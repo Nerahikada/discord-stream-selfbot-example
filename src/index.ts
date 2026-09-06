@@ -1,19 +1,18 @@
 import { Client, StageChannel } from "discord.js-selfbot-v13";
 import type { Collection, GuildMember } from "discord.js-selfbot-v13";
 import { Streamer, prepareStream, playStream } from "@dank074/discord-video-stream";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
-const TOKEN = process.env.DISCORD_TOKEN!;
-const VIDEO_PATH = process.env.VIDEO_PATH!;
+interface Config {
+    token: string;
+    videoPath: string;
+}
 
-if (!TOKEN || !VIDEO_PATH) {
-    console.error("Missing required env vars: DISCORD_TOKEN, VIDEO_PATH");
-    process.exit(1);
-}
-if (!existsSync(VIDEO_PATH)) {
-    console.error(`Video file not found: ${VIDEO_PATH}`);
-    process.exit(1);
-}
+const config: Config = JSON.parse(readFileSync(new URL("../config.json", import.meta.url), "utf-8"));
+
+if (!config.token) { console.error("Missing token in config.json"); process.exit(1); }
+if (!config.videoPath) { console.error("Missing videoPath in config.json"); process.exit(1); }
+if (!existsSync(config.videoPath)) { console.error(`Video file not found: ${config.videoPath}`); process.exit(1); }
 
 const client = new Client();
 const streamer = new Streamer(client);
@@ -47,10 +46,7 @@ async function startStreaming(guildId: string, channelId: string): Promise<void>
 
     console.log("Starting video playback...");
     try {
-        const { output, promise } = prepareStream(VIDEO_PATH, {
-            noTranscoding: true,
-            customInputOptions: ["-stream_loop", "-1"],
-        }, ac.signal);
+        const { output, promise } = prepareStream(config.videoPath, { noTranscoding: true, customInputOptions: ["-stream_loop", "-1"] }, ac.signal);
         await playStream(output, streamer, { type: "go-live" }, ac.signal);
         await promise.catch(() => {});
     } catch (e) {
@@ -128,11 +124,11 @@ client.on("voiceStateUpdate", (oldState, newState) => {
 
 client.on("ready", () => {
     console.log(`Logged in as ${client.user?.tag}`);
-    console.log(`Video: ${VIDEO_PATH}`);
+    console.log(`Video: ${config.videoPath}`);
     console.log("Commands: !start / !stop (from any text channel)");
 });
 
 process.on("SIGINT", () => { stopStreaming(); process.exit(0); });
 process.on("SIGTERM", () => { stopStreaming(); process.exit(0); });
 
-client.login(TOKEN);
+client.login(config.token);
