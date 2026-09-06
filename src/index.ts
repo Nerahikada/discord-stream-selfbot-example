@@ -5,14 +5,15 @@ import { existsSync, readFileSync } from "node:fs";
 
 interface Config {
     token: string;
-    videoPath: string;
+    videos: Record<string, string>;
 }
 
 const config: Config = JSON.parse(readFileSync(new URL("../config.json", import.meta.url), "utf-8"));
 
 if (!config.token) { console.error("Missing token in config.json"); process.exit(1); }
-if (!config.videoPath) { console.error("Missing videoPath in config.json"); process.exit(1); }
-if (!existsSync(config.videoPath)) { console.error(`Video file not found: ${config.videoPath}`); process.exit(1); }
+if (!config.videos || Object.keys(config.videos).length === 0) { console.error("No videos defined in config.json"); process.exit(1); }
+
+const videoKeys = Object.keys(config.videos);
 
 const client = new Client();
 const streamer = new Streamer(client);
@@ -20,8 +21,9 @@ const streamer = new Streamer(client);
 let controller: AbortController | null = null;
 let activeChannelId: string | null = null;
 let activeGuildId: string | null = null;
+let activeVideoKey: string | null = null;
 
-async function startStreaming(guildId: string, channelId: string): Promise<void> {
+async function startStreaming(guildId: string, channelId: string, videoPath: string): Promise<void> {
     if (controller) return;
 
     const ac = new AbortController();
@@ -40,19 +42,19 @@ async function startStreaming(guildId: string, channelId: string): Promise<void>
         console.log(`Joined voice channel ${channelId} in guild ${guildId}`);
     } catch (e) {
         console.error("Failed to join voice channel:", e);
-        if (controller === ac) { controller = null; activeChannelId = null; activeGuildId = null; }
+        if (controller === ac) { controller = null; activeChannelId = null; activeGuildId = null; activeVideoKey = null; }
         return;
     }
 
-    console.log("Starting video playback...");
+    console.log(`Starting video playback: ${videoPath}`);
     try {
-        const { output, promise } = prepareStream(config.videoPath, { noTranscoding: true, customInputOptions: ["-stream_loop", "-1"] }, ac.signal);
+        const { output, promise } = prepareStream(videoPath, { noTranscoding: true, customInputOptions: ["-stream_loop", "-1"] }, ac.signal);
         await playStream(output, streamer, { type: "go-live" }, ac.signal);
         await promise.catch(() => {});
     } catch (e) {
         if (!ac.signal.aborted) console.error("Playback error:", e);
     } finally {
-        if (controller === ac) { controller = null; activeChannelId = null; activeGuildId = null; }
+        if (controller === ac) { controller = null; activeChannelId = null; activeGuildId = null; activeVideoKey = null; }
     }
 }
 
@@ -63,6 +65,7 @@ function stopStreaming(): void {
     controller = null;
     activeChannelId = null;
     activeGuildId = null;
+    activeVideoKey = null;
     streamer.leaveVoice();
     console.log("Left voice channel.");
 }
@@ -71,9 +74,23 @@ client.on("messageCreate", (message) => {
     if (message.author.id === client.user?.id) return;
     if (!message.guild) return;
 
-    const content = message.content.trim().toLowerCase();
+    const content = message.content.trim();
+    const lower = content.toLowerCase();
 
-    if (content === "!start") {
+    if (lower.startsWith("!start")) {
+        const arg = content.slice(6).trim() || null;
+        const key = arg ?? videoKeys[0];
+        const videoPath = config.videos[key];
+
+        if (!videoPath) {
+            console.log(`!start from ${message.author.tag} — unknown key "${key}", available: ${videoKeys.join(", ")}`);
+            return;
+        }
+        if (!existsSync(videoPath)) {
+            console.log(`!start from ${message.author.tag} — file not found: ${videoPath}`);
+            return;
+        }
+
         const member = message.guild.members.cache.get(message.author.id);
         const voiceChannelId = member?.voice.channelId;
         if (!member || !voiceChannelId) {
@@ -84,11 +101,12 @@ client.on("messageCreate", (message) => {
             console.log(`!start from ${message.author.tag} — already playing, ignoring`);
             return;
         }
-        console.log(`!start from ${message.author.tag} — joining ${voiceChannelId}`);
-        startStreaming(message.guild.id, voiceChannelId);
+        console.log(`!start ${key} from ${message.author.tag} — joining ${voiceChannelId}`);
+        activeVideoKey = key;
+        startStreaming(message.guild.id, voiceChannelId, videoPath);
     }
 
-    if (content === "!stop") {
+    if (lower === "!stop") {
         if (!controller || message.guild.id !== activeGuildId) return;
         const member = message.guild.members.cache.get(message.author.id);
         if (!member?.voice.channelId) {
@@ -99,6 +117,7 @@ client.on("messageCreate", (message) => {
         const delay = 2000 + Math.random() * 3000;
         setTimeout(() => stopStreaming(), delay);
     }
+
 });
 
 client.on("voiceStateUpdate", (oldState, newState) => {
@@ -124,8 +143,8 @@ client.on("voiceStateUpdate", (oldState, newState) => {
 
 client.on("ready", () => {
     console.log(`Logged in as ${client.user?.tag}`);
-    console.log(`Video: ${config.videoPath}`);
-    console.log("Commands: !start / !stop (from any text channel)");
+    console.log(`Videos: ${videoKeys.map(k => `${k} → ${config.videos[k]}`).join(", ")}`);
+    console.log("Commands: !start [key] / !stop");
 });
 
 process.on("SIGINT", () => { stopStreaming(); process.exit(0); });

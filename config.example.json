@@ -1,4 +1,7 @@
 {
   "token": "your_user_token_here",
-  "videoPath": "/path/to/video.ts"
+  "videos": {
+    "main": "/path/to/video.ts",
+    "lofi": "/path/to/another.mp4"
+  }
 }
