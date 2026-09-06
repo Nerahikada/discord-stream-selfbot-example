@@ -22,17 +22,16 @@ let controller: AbortController | null = null;
 let activeChannelId: string | null = null;
 let activeGuildId: string | null = null;
 let activeVideoKey: string | null = null;
+let voiceConnected = false;
 
 async function startStreaming(guildId: string, channelId: string, videoPath: string): Promise<void> {
-    if (controller) return;
-
-    const ac = new AbortController();
-    controller = ac;
-    activeGuildId = guildId;
-    activeChannelId = channelId;
+    const ac = controller;
+    if (!ac || ac.signal.aborted) return;
 
     try {
         await streamer.joinVoice(guildId, channelId);
+        if (ac.signal.aborted) return;
+        voiceConnected = true;
         const joinedChannel = client.channels.cache.get(channelId);
         if (joinedChannel instanceof StageChannel) await client.user?.voice?.setSuppressed(false);
         console.log(`Joined voice channel ${channelId} in guild ${guildId}`);
@@ -42,6 +41,16 @@ async function startStreaming(guildId: string, channelId: string, videoPath: str
         return;
     }
 
+    await startPlayback(videoPath, ac);
+}
+
+async function swapStream(videoPath: string): Promise<void> {
+    const ac = controller;
+    if (!ac || ac.signal.aborted) return;
+    await startPlayback(videoPath, ac);
+}
+
+async function startPlayback(videoPath: string, ac: AbortController): Promise<void> {
     console.log(`Starting video playback: ${videoPath}`);
     try {
         const { output, promise } = prepareStream(videoPath, { noTranscoding: true, customInputOptions: ["-stream_loop", "-1"] }, ac.signal);
@@ -62,6 +71,7 @@ function stopStreaming(): void {
     activeChannelId = null;
     activeGuildId = null;
     activeVideoKey = null;
+    voiceConnected = false;
     streamer.leaveVoice();
     console.log("Left voice channel.");
 }
@@ -87,19 +97,38 @@ client.on("messageCreate", (message) => {
             return;
         }
 
-        const member = message.guild.members.cache.get(message.author.id);
+        const guild = message.guild;
+        const member = guild.members.cache.get(message.author.id);
         const voiceChannelId = member?.voice.channelId;
         if (!member || !voiceChannelId) {
             console.log(`!start from ${message.author.tag} — not in a voice channel, ignoring`);
             return;
         }
+        let sameChannel = false;
         if (controller) {
-            console.log(`!start from ${message.author.tag} — already playing, ignoring`);
-            return;
+            if (key === activeVideoKey) {
+                console.log(`!start from ${message.author.tag} — already playing "${key}", ignoring`);
+                return;
+            }
+            sameChannel = voiceConnected && voiceChannelId === activeChannelId;
+            console.log(`!start ${key} from ${message.author.tag} — swapping from "${activeVideoKey}"${sameChannel ? "" : " (changing channel)"}`);
+            if (sameChannel) {
+                controller.abort();
+            } else {
+                stopStreaming();
+            }
+        } else {
+            console.log(`!start ${key} from ${message.author.tag} — joining ${voiceChannelId}`);
         }
-        console.log(`!start ${key} from ${message.author.tag} — joining ${voiceChannelId}`);
+        controller = new AbortController();
+        activeGuildId = guild.id;
+        activeChannelId = voiceChannelId;
         activeVideoKey = key;
-        startStreaming(message.guild.id, voiceChannelId, videoPath);
+        if (sameChannel) {
+            swapStream(videoPath);
+        } else {
+            startStreaming(guild.id, voiceChannelId, videoPath);
+        }
     }
 
     if (lower === "!stop") {
