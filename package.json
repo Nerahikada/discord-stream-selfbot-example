@@ -1,0 +1,19 @@
+{
+  "name": "discord-stream-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "setup:ffmpeg": "test -x bin/ffmpeg || (mkdir -p bin && curl -sL https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz | tar -xJ --strip-components=2 -C bin ffmpeg-master-latest-linux64-gpl/bin/ffmpeg && echo 'ffmpeg downloaded to bin/')",
+    "start": "npm run setup:ffmpeg && FFMPEG_PATH=$PWD/bin/ffmpeg node --env-file-if-exists=.env src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@dank074/discord-video-stream": "https://pkg.pr.new/Discord-RE/Discord-video-stream/@dank074/discord-video-stream@f12e545c",
+    "discord.js-selfbot-v13": "3.7.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  }
+}
