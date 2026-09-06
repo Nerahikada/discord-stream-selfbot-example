@@ -1,6 +1,6 @@
 import { Client, StageChannel } from "discord.js-selfbot-v13";
 import type { Collection, GuildMember } from "discord.js-selfbot-v13";
-import { Streamer, prepareStream, playStream, Encoders, Utils } from "@dank074/discord-video-stream";
+import { Streamer, prepareStream, playStream } from "@dank074/discord-video-stream";
 import { existsSync } from "node:fs";
 
 const TOKEN = process.env.DISCORD_TOKEN!;
@@ -48,16 +48,7 @@ async function startStreaming(guildId: string, channelId: string): Promise<void>
     console.log("Starting video playback...");
     try {
         const { output, promise } = prepareStream(VIDEO_PATH, {
-            encoder: Encoders.software({ x264: { preset: "superfast" } }),
-            height: 720,
-            frameRate: 30,
-            bitrateVideo: 3000,
-            bitrateVideoMax: 5000,
-            videoCodec: Utils.normalizeVideoCodec("H264"),
-            includeAudio: true,
-            bitrateAudio: 128,
-            hardwareAcceleratedDecoding: false,
-            minimizeLatency: false,
+            noTranscoding: true,
             customInputOptions: ["-stream_loop", "-1"],
         }, ac.signal);
         await playStream(output, streamer, { type: "go-live" }, ac.signal);
