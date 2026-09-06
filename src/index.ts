@@ -100,7 +100,8 @@ client.on("messageCreate", (message) => {
             return;
         }
         console.log(`!stop from ${message.author.tag}`);
-        stopStreaming();
+        const delay = 2000 + Math.random() * 3000;
+        setTimeout(() => stopStreaming(), delay);
     }
 });
 
