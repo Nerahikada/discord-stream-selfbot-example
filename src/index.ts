@@ -31,10 +31,6 @@ async function startStreaming(guildId: string, channelId: string, videoPath: str
     activeGuildId = guildId;
     activeChannelId = channelId;
 
-    const delay = 2000 + Math.random() * 3000;
-    await new Promise(r => setTimeout(r, delay));
-    if (ac.signal.aborted) return;
-
     try {
         await streamer.joinVoice(guildId, channelId);
         const joinedChannel = client.channels.cache.get(channelId);
@@ -114,8 +110,7 @@ client.on("messageCreate", (message) => {
             return;
         }
         console.log(`!stop from ${message.author.tag}`);
-        const delay = 2000 + Math.random() * 3000;
-        setTimeout(() => stopStreaming(), delay);
+        stopStreaming();
     }
 
 });
