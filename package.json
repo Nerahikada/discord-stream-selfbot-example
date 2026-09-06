@@ -6,7 +6,8 @@
   "scripts": {
     "setup:ffmpeg": "test -x bin/ffmpeg || (mkdir -p bin && curl -sL https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz | tar -xJ --strip-components=2 -C bin ffmpeg-master-latest-linux64-gpl/bin/ffmpeg && echo 'ffmpeg downloaded to bin/')",
     "start": "npm run setup:ffmpeg && FFMPEG_PATH=$PWD/bin/ffmpeg node --env-file-if-exists=.env src/index.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "convert": "npm run setup:ffmpeg && sh -c 'set -e; tmp=\"${1%.*}.tmp.mp4\"; ./bin/ffmpeg -y -i \"$1\" -c:v libx264 -preset medium -crf 20 -bf 0 -forced-idr 1 -force_key_frames \"expr:gte(t,n_forced*1)\" -pix_fmt yuv420p -c:a copy \"$tmp\" && mv \"$tmp\" \"$1\"' --"
   },
   "dependencies": {
     "@dank074/discord-video-stream": "https://pkg.pr.new/Discord-RE/Discord-video-stream/@dank074/discord-video-stream@f12e545c",
