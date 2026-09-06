@@ -28,6 +28,7 @@ let activeChannelId: string | null = null;
 let activeGuildId: string | null = null;
 let activeVideoKey: string | null = null;
 let streamConn: any = null;
+let packetizerReady = false;
 
 async function startStreaming(guildId: string, channelId: string, videoPath: string): Promise<void> {
     const expectedKey = activeVideoKey;
@@ -68,8 +69,11 @@ async function startPlayback(videoPath: string): Promise<void> {
         if (ac.signal.aborted || !streamConn) return;
         if (!video) throw new Error("No video stream in media");
 
-        streamConn.setPacketizer(videoCodecMap[video.codec]);
-        streamConn.mediaConnection.setSpeaking(true);
+        if (!packetizerReady) {
+            streamConn.setPacketizer(videoCodecMap[video.codec]);
+            streamConn.mediaConnection.setSpeaking(true);
+            packetizerReady = true;
+        }
         streamConn.mediaConnection.setVideoAttributes(true, { width: video.width, height: video.height, fps: Math.round(video.framerate_num / video.framerate_den) });
 
         const vStream = new VideoStream(streamConn);
@@ -99,7 +103,7 @@ function stopStreaming(): void {
     console.log("Stopping stream...");
     playbackAbort?.abort();
     playbackAbort = null;
-    if (streamConn) { streamer.stopStream(); streamConn = null; }
+    if (streamConn) { streamer.stopStream(); streamConn = null; packetizerReady = false; }
     streamer.leaveVoice();
     activeChannelId = null; activeGuildId = null; activeVideoKey = null;
     console.log("Left voice channel.");
