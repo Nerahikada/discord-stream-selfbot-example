@@ -2,4 +2,10 @@ node_modules/
 dist/
 bin/
 .env
+.env.*
+!.env.example
 config.json
+*.log
+*.tsbuildinfo
+*.tgz
+.npm
