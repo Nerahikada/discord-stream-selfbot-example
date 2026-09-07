@@ -205,7 +205,8 @@ client.on("ready", () => {
     console.log("Commands: !start [key] / !stop");
 });
 
-process.on("SIGINT", () => { stopStreaming(); process.exit(0); });
-process.on("SIGTERM", () => { stopStreaming(); process.exit(0); });
+function shutdown(): void { stopStreaming(); client.destroy(); setTimeout(() => process.exit(0), 2000).unref(); }
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
 
 client.login(config.token);
