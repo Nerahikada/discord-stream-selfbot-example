@@ -192,8 +192,8 @@ client.on("voiceStateUpdate", (oldState, newState) => {
     if (!channel || !("members" in channel)) return;
 
     const members = channel.members as Collection<string, GuildMember>;
-    const otherMembers = members.filter((m: GuildMember) => m.id !== client.user?.id);
-    if (otherMembers.size === 0) {
+    const humanMembers = members.filter((m: GuildMember) => m.id !== client.user?.id && !m.user.bot);
+    if (humanMembers.size === 0) {
         console.log("Voice channel is empty, stopping...");
         stopStreaming();
     }
