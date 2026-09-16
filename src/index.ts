@@ -1,5 +1,5 @@
-import { Client, StageChannel } from "discord.js-selfbot-v13";
-import type { Collection, GuildMember } from "discord.js-selfbot-v13";
+import { Client, StageChannel } from "@lng2004/discord.js-selfbot-v13";
+import type { Collection, GuildMember } from "@lng2004/discord.js-selfbot-v13";
 import { Streamer, prepareStream, demux } from "@dank074/discord-video-stream";
 import { createRequire } from "node:module";
 import { existsSync, readFileSync } from "node:fs";
