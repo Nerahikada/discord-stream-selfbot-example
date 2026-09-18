@@ -63,9 +63,13 @@ async function startPlayback(videoPath: string): Promise<void> {
     playbackAbort = ac;
 
     console.log(`Starting video playback: ${videoPath}`);
+    // Without -readrate, ffmpeg reads a local file as fast as the disk allows, and node-av's demux thread busy-spins on setImmediate for as long as its packet queue stays full. Pacing ffmpeg at 1x keeps that queue from saturating.
+    const { output, promise: ffmpegDone } = prepareStream(videoPath, { noTranscoding: true, customInputOptions: ["-stream_loop", "-1", "-readrate", "1", "-readrate_initial_burst", "1"] }, ac.signal);
+    let demuxed: { video?: any; audio?: any } = {};
+
     try {
-        const { output, promise: ffmpegDone } = prepareStream(videoPath, { noTranscoding: true, customInputOptions: ["-stream_loop", "-1"] }, ac.signal);
-        const { video, audio } = await demux(output, { format: "nut" });
+        demuxed = await demux(output, { format: "nut" });
+        const { video, audio } = demuxed;
         if (ac.signal.aborted || !streamConn) return;
         if (!video) throw new Error("No video stream in media");
 
@@ -91,10 +95,16 @@ async function startPlayback(videoPath: string): Promise<void> {
             ac.signal.addEventListener("abort", onAbort, { once: true });
             vStream.once("finish", resolve);
         });
-        await ffmpegDone.catch(() => {});
+        video.stream.unpipe(vStream);
+        if (aStream) audio.stream.unpipe(aStream);
     } catch (e) {
         if (!ac.signal.aborted) console.error("Playback error:", e);
     } finally {
+        // The demuxer only tears itself down once it reads EOF, and it cannot reach that read until its packet queue is drained. Leaving a full queue behind keeps it spinning at 100% CPU forever.
+        output.destroy();
+        demuxed.video?.stream.resume();
+        demuxed.audio?.stream.resume();
+        await ffmpegDone.catch(() => {});
         if (playbackAbort === ac) stopStreaming();
     }
 }
