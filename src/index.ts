@@ -132,11 +132,11 @@ client.on("messageCreate", (message) => {
         const videoPath = config.videos[key];
 
         if (!videoPath) {
-            console.log(`!start from ${message.author.tag} — unknown key "${key}", available: ${videoKeys.join(", ")}`);
+            console.log(`Ignoring !start from ${message.author.tag}: unknown key "${key}" (available: ${videoKeys.join(", ")})`);
             return;
         }
         if (!existsSync(videoPath)) {
-            console.log(`!start from ${message.author.tag} — file not found: ${videoPath}`);
+            console.log(`Ignoring !start from ${message.author.tag}: file not found at ${videoPath}`);
             return;
         }
 
@@ -144,25 +144,25 @@ client.on("messageCreate", (message) => {
         const member = guild.members.cache.get(message.author.id);
         const voiceChannelId = member?.voice.channelId;
         if (!member || !voiceChannelId) {
-            console.log(`!start from ${message.author.tag} — not in a voice channel, ignoring`);
+            console.log(`Ignoring !start from ${message.author.tag}: not in a voice channel`);
             return;
         }
 
         let sameChannel = false;
         if (activeVideoKey) {
             if (key === activeVideoKey) {
-                console.log(`!start from ${message.author.tag} — already playing "${key}", ignoring`);
+                console.log(`Ignoring !start from ${message.author.tag}: "${key}" is already playing`);
                 return;
             }
             sameChannel = !!streamConn && voiceChannelId === activeChannelId;
-            console.log(`!start ${key} from ${message.author.tag} — swapping from "${activeVideoKey}"${sameChannel ? "" : " (changing channel)"}`);
+            console.log(`Swapping from "${activeVideoKey}" to "${key}" at the request of ${message.author.tag}${sameChannel ? "" : " (changing channel)"}`);
             if (sameChannel) {
                 playbackAbort?.abort();
             } else {
                 stopStreaming();
             }
         } else {
-            console.log(`!start ${key} from ${message.author.tag} — joining ${voiceChannelId}`);
+            console.log(`Joining voice channel ${voiceChannelId} to play "${key}" at the request of ${message.author.tag}`);
         }
 
         activeGuildId = guild.id;
@@ -180,10 +180,10 @@ client.on("messageCreate", (message) => {
         if (!activeVideoKey || message.guild.id !== activeGuildId) return;
         const member = message.guild.members.cache.get(message.author.id);
         if (!member?.voice.channelId) {
-            console.log(`!stop from ${message.author.tag} — not in a voice channel, ignoring`);
+            console.log(`Ignoring !stop from ${message.author.tag}: not in a voice channel`);
             return;
         }
-        console.log(`!stop from ${message.author.tag}`);
+        console.log(`Received !stop from ${message.author.tag}`);
         stopStreaming();
     }
 });
