@@ -10,7 +10,7 @@
     "convert": "npm run setup:ffmpeg && sh -c './bin/ffmpeg -i \"$1\" -c:v libx264 -preset medium -crf 20 -bf 0 -forced-idr 1 -force_key_frames \"expr:gte(t,n_forced*1)\" -pix_fmt yuv420p -c:a aac -b:a 128k \"${1%.*}.ts\"' --"
   },
   "dependencies": {
-    "@dank074/discord-video-stream": "https://pkg.pr.new/Discord-RE/Discord-video-stream/@dank074/discord-video-stream@7a2a6f4",
+    "@dank074/discord-video-stream": "https://pkg.pr.new/Discord-RE/Discord-video-stream/@dank074/discord-video-stream@f12e046",
     "@lng2004/discord.js-selfbot-v13": "^3.7.2"
   },
   "devDependencies": {
