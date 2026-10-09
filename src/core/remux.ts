@@ -3,6 +3,10 @@ import type { Readable } from "node:stream";
 import type { MediaTrack } from "./resolve.ts";
 
 const ffmpegPath = process.env.FFMPEG_PATH ?? "ffmpeg";
+// A single signed CDN URL runs past 1KB, and ffmpeg echoes the whole thing when an input fails, so the tail has to be roomy enough to still hold the lines around it.
+const stderrTailChars = 8000;
+const stderrTailLines = 4;
+const stderrLineChars = 300;
 
 function headerArgs(headers: Record<string, string>): string[] {
     const entries = Object.entries(headers);
@@ -33,14 +37,15 @@ export function remux(video: MediaTrack, audio: MediaTrack | null, signal: Abort
 
     // A long stream can log reconnect noise for hours, so keep only enough tail to explain a failure. setEncoding decodes through a StringDecoder, so a multi-byte character split across chunks survives.
     child.stderr.setEncoding("utf-8");
-    child.stderr.on("data", (chunk: string) => { stderrTail = (stderrTail + chunk).slice(-2000); });
+    child.stderr.on("data", (chunk: string) => { stderrTail = (stderrTail + chunk).slice(-stderrTailChars); });
     child.on("error", (e) => { if (!signal.aborted) console.error("Remux ffmpeg failed to start:", e); });
     // The transcoder closing its stdin first is normal teardown, and an unhandled EPIPE here would take the process down.
     child.stdout.on("error", () => {});
     child.on("close", (code) => {
         if (code === 0 || signal.aborted) return;
-        const message = stderrTail.trim().split("\n").at(-1);
-        if (message) console.error(`Remux ffmpeg exited with ${code}: ${message}`);
+        // ffmpeg names the failing input on the lines before its own summary line, so the last line alone cannot tell a 403 on the video URL from one on the audio URL.
+        const lines = stderrTail.trim().split("\n").map((line) => line.trim()).filter(Boolean).slice(-stderrTailLines).map((line) => (line.length > stderrLineChars ? `${line.slice(0, stderrLineChars)}…` : line));
+        if (lines.length > 0) console.error(`Remux ffmpeg exited with ${code}:\n${lines.map((line) => `  ${line}`).join("\n")}`);
     });
 
     return child.stdout;
