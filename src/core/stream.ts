@@ -18,6 +18,9 @@ export interface PlaybackSource { label: string; open: (signal: AbortSignal) => 
 
 export interface RequestContext { command: string; requester: string }
 
+/** Identity of one request. A fresh object per request, so an in-flight join can tell it has been superseded by comparing against the session's current one. */
+interface ActiveRequest { guildId: string; channelId: string; label: string }
+
 /** Returns the voice channel the message author sits in, or null (logging why) if they are not in one. */
 export function voiceChannelOf(message: Message, command: string): string | null {
     const member = message.guild?.members.cache.get(message.author.id);
@@ -36,23 +39,20 @@ export class StreamSession {
     private playbackAbort: AbortController | null = null;
     private streamConn: any = null;
     private packetizerReady = false;
-    private activeGuildId: string | null = null;
-    private activeChannelId: string | null = null;
-    private activeLabel: string | null = null;
-    // Bumped on every request and every stop, so an in-flight join can tell it has been superseded. The label alone cannot: replaying the same one ("a", stop, "a") looks unchanged.
-    private generation = 0;
+    private active: ActiveRequest | null = null;
 
     /** Plays `source`, joining or swapping as needed. Logs and ignores the request if it is already playing. */
     request(guildId: string, channelId: string, source: PlaybackSource, ctx: RequestContext): void {
+        const previous = this.active;
         let sameChannel = false;
 
-        if (this.activeLabel) {
-            if (source.label === this.activeLabel) {
+        if (previous) {
+            if (source.label === previous.label) {
                 console.log(`Ignoring ${ctx.command} from ${ctx.requester}: "${source.label}" is already playing`);
                 return;
             }
-            sameChannel = !!this.streamConn && channelId === this.activeChannelId;
-            console.log(`Swapping from "${this.activeLabel}" to "${source.label}" at the request of ${ctx.requester}${sameChannel ? "" : " (changing channel)"}`);
+            sameChannel = !!this.streamConn && channelId === previous.channelId;
+            console.log(`Swapping from "${previous.label}" to "${source.label}" at the request of ${ctx.requester}${sameChannel ? "" : " (changing channel)"}`);
             if (sameChannel) {
                 this.playbackAbort?.abort();
             } else {
@@ -62,22 +62,21 @@ export class StreamSession {
             console.log(`Joining voice channel ${channelId} to play "${source.label}" at the request of ${ctx.requester}`);
         }
 
-        const generation = ++this.generation;
-        this.activeGuildId = guildId;
-        this.activeChannelId = channelId;
-        this.activeLabel = source.label;
+        const active: ActiveRequest = { guildId, channelId, label: source.label };
+        this.active = active;
 
         // Deliberately not awaited: both drive the stream in the background. The catch only exists so an unexpected throw cannot take the process down.
         if (sameChannel) {
             this.startPlayback(source).catch((e) => console.error("Playback failed:", e));
         } else {
-            this.startStreaming(generation, guildId, channelId, source).catch((e) => console.error("Streaming failed:", e));
+            this.startStreaming(active, source).catch((e) => console.error("Streaming failed:", e));
         }
     }
 
     /** Handles a `!stop` message, ignoring it unless the author shares the guild and is in a voice channel. */
     handleStop(message: Message): void {
-        if (!this.activeLabel || !message.guild || message.guild.id !== this.activeGuildId) return;
+        const active = this.active;
+        if (!active || !message.guild || message.guild.id !== active.guildId) return;
         const member = message.guild.members.cache.get(message.author.id);
         if (!member?.voice.channelId) {
             console.log(`Ignoring !stop from ${message.author.tag}: not in a voice channel`);
@@ -89,12 +88,11 @@ export class StreamSession {
 
     stop(): void {
         console.log("Stopping stream...");
-        this.generation += 1;
         this.playbackAbort?.abort();
         this.playbackAbort = null;
         if (this.streamConn) { this.streamer.stopStream(); this.streamConn = null; this.packetizerReady = false; }
         this.streamer.leaveVoice();
-        this.activeChannelId = null; this.activeGuildId = null; this.activeLabel = null;
+        this.active = null;
         console.log("Left voice channel.");
     }
 
@@ -104,16 +102,17 @@ export class StreamSession {
         if (!token) { console.error("Missing DISCORD_TOKEN. Copy .env.example to .env and fill it in."); process.exit(1); }
 
         this.client.on("voiceStateUpdate", (oldState, newState) => {
-            if (!this.activeLabel || !this.activeChannelId) return;
+            const active = this.active;
+            if (!active) return;
 
-            if (oldState.id === this.client.user?.id && oldState.channelId === this.activeChannelId && newState.channelId !== this.activeChannelId) {
+            if (oldState.id === this.client.user?.id && oldState.channelId === active.channelId && newState.channelId !== active.channelId) {
                 console.log("Bot was moved or kicked from voice channel, stopping...");
                 this.stop();
                 return;
             }
 
-            if (oldState.channelId !== this.activeChannelId) return;
-            const channel = oldState.guild.channels.cache.get(this.activeChannelId);
+            if (oldState.channelId !== active.channelId) return;
+            const channel = oldState.guild.channels.cache.get(active.channelId);
             if (!channel || !("members" in channel)) return;
 
             const members = channel.members as Collection<string, GuildMember>;
@@ -131,30 +130,30 @@ export class StreamSession {
         this.client.login(token);
     }
 
-    private async startStreaming(generation: number, guildId: string, channelId: string, source: PlaybackSource): Promise<void> {
+    private async startStreaming(active: ActiveRequest, source: PlaybackSource): Promise<void> {
         try {
-            await this.streamer.joinVoice(guildId, channelId);
+            await this.streamer.joinVoice(active.guildId, active.channelId);
             // A stop() during the join already called leaveVoice, but this join landed after it, so undo it here. If something else is active instead, a newer request owns the connection and it must be left alone.
-            if (this.generation !== generation) { if (!this.activeLabel) this.streamer.leaveVoice(); return; }
-            const joinedChannel = this.client.channels.cache.get(channelId);
+            if (this.active !== active) { if (!this.active) this.streamer.leaveVoice(); return; }
+            const joinedChannel = this.client.channels.cache.get(active.channelId);
             if (joinedChannel instanceof StageChannel) await this.client.user?.voice?.setSuppressed(false);
-            console.log(`Joined voice channel ${channelId} in guild ${guildId}`);
+            console.log(`Joined voice channel ${active.channelId} in guild ${active.guildId}`);
         } catch (e) {
             console.error("Failed to join voice channel:", e);
-            if (this.generation === generation) { this.activeChannelId = null; this.activeGuildId = null; this.activeLabel = null; }
+            if (this.active === active) this.active = null;
             return;
         }
 
-        // Held locally until the generation check passes, so a stale join cannot overwrite the connection a newer request already published.
+        // Held locally until the identity check passes, so a stale join cannot overwrite the connection a newer request already published.
         let conn: any;
         try {
             conn = await this.streamer.createStream();
         } catch (e) {
             console.error("Failed to create go-live stream:", e);
-            if (this.generation === generation) { this.streamer.leaveVoice(); this.activeChannelId = null; this.activeGuildId = null; this.activeLabel = null; }
+            if (this.active === active) { this.streamer.leaveVoice(); this.active = null; }
             return;
         }
-        if (this.generation !== generation) { if (!this.activeLabel) { this.streamer.stopStream(); this.streamer.leaveVoice(); } return; }
+        if (this.active !== active) { if (!this.active) { this.streamer.stopStream(); this.streamer.leaveVoice(); } return; }
         this.streamConn = conn;
         console.log("Go-live stream created");
 
