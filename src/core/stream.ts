@@ -86,14 +86,16 @@ export class StreamSession {
         this.stop();
     }
 
+    /** Tears everything down. The teardown itself runs unconditionally, so a half-finished join cannot leave the session connected, but it only narrates when there was something to stop. */
     stop(): void {
-        console.log("Stopping stream...");
+        const wasActive = this.active !== null;
+        if (wasActive) console.log("Stopping stream...");
         this.playbackAbort?.abort();
         this.playbackAbort = null;
         if (this.streamConn) { this.streamer.stopStream(); this.streamConn = null; this.packetizerCodec = null; }
         this.streamer.leaveVoice();
         this.active = null;
-        console.log("Left voice channel.");
+        if (wasActive) console.log("Left voice channel.");
     }
 
     /** Wires up the voice-state guards and signal handlers, then logs in with `DISCORD_TOKEN`. */
