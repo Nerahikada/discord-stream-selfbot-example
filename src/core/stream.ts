@@ -73,13 +73,13 @@ export class StreamSession {
         }
     }
 
-    /** Handles a `!stop` message, ignoring it unless the author shares the guild and is in a voice channel. */
+    /** Handles a `!stop` message, ignoring it unless the author is listening in the channel being streamed to. */
     handleStop(message: Message): void {
         const active = this.active;
         if (!active || !message.guild || message.guild.id !== active.guildId) return;
         const member = message.guild.members.cache.get(message.author.id);
-        if (!member?.voice.channelId) {
-            console.log(`Ignoring !stop from ${message.author.tag}: not in a voice channel`);
+        if (member?.voice.channelId !== active.channelId) {
+            console.log(`Ignoring !stop from ${message.author.tag}: not in the voice channel being streamed to`);
             return;
         }
         console.log(`Received !stop from ${message.author.tag}`);
