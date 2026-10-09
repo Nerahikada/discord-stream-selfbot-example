@@ -24,8 +24,22 @@ async function runYtDlp(args: string[]): Promise<string> {
     }
 }
 
+// Only the attribute names yt-dlp actually emits: a wider list would start eating cookies that happen to be named after one.
+const cookieAttributes = new Set(["domain", "path", "expires", "max-age", "secure", "httponly", "samesite"]);
+
+/** Builds a `Cookie` header out of yt-dlp's per-format cookie string, which arrives Set-Cookie style with each pair's attributes inline after it. */
+function cookieHeader(cookies: unknown): string | null {
+    if (typeof cookies !== "string") return null;
+    const pairs = cookies.split(";").map((part) => part.trim()).filter((part) => part.includes("=") && !cookieAttributes.has(part.split("=", 1)[0].trim().toLowerCase()));
+    return pairs.length > 0 ? pairs.join("; ") : null;
+}
+
 function toTrack(format: any): MediaTrack {
-    return { url: format.url, headers: typeof format.http_headers === "object" && format.http_headers ? format.http_headers : {} };
+    const headers: Record<string, string> = typeof format.http_headers === "object" && format.http_headers ? { ...format.http_headers } : {};
+    // niconico's domand delivery keeps its auth out of http_headers and 403s every request that arrives without it, so the cookie jar has to be folded in here.
+    const cookie = cookieHeader(format.cookies);
+    if (cookie && !Object.keys(headers).some((name) => name.toLowerCase() === "cookie")) headers.Cookie = cookie;
+    return { url: format.url, headers };
 }
 
 function toNumber(value: unknown): number | null {
