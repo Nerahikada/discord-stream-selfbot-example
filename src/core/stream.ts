@@ -12,6 +12,8 @@ const { AudioStream } = await import(_libBase + "dist/media/AudioStream.js");
 const { AVCodecID } = await import(_libBase + "dist/media/LibavCodecId.js");
 
 const videoCodecMap: Record<number, string | undefined> = { [AVCodecID.AV_CODEC_ID_H264]: "H264", [AVCodecID.AV_CODEC_ID_H265]: "H265", [AVCodecID.AV_CODEC_ID_VP8]: "VP8", [AVCodecID.AV_CODEC_ID_VP9]: "VP9", [AVCodecID.AV_CODEC_ID_AV1]: "AV1" };
+// A header follows within a second of data actually flowing, so this only has to be loose enough to cover a slow start.
+const headerTimeoutMs = 30_000;
 
 /** One thing to play: `label` identifies it for dedupe and logs, `open` yields the ffmpeg input and may tie child processes to the playback's signal. */
 export interface PlaybackSource { label: string; open: (signal: AbortSignal) => string | Readable; prepareOptions: Partial<PrepareStreamOptions> }
@@ -30,6 +32,29 @@ export function voiceChannelOf(message: Message, command: string): string | null
         return null;
     }
     return voiceChannelId;
+}
+
+/** Awaits the demuxer, giving up if ffmpeg settles, the playback is torn down, or no header arrives in time. A source that never produces a readable header leaves `demux` pending forever and destroying its input is the only thing that wakes it, so every way the wait can stall needs its own exit.
+
+A pending demuxer also holds a native thread that `process.exit` then deadlocks on, which is why giving up matters beyond this one playback: without it the whole bot stops responding to anything short of SIGKILL. */
+async function demuxOrGiveUp(output: Readable, ffmpegDone: Promise<unknown>, signal: AbortSignal): Promise<Awaited<ReturnType<typeof demux>>> {
+    let state: "waiting" | "demuxed" | "gave-up" = "waiting";
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const demuxed = demux(output, { format: "nut" });
+    // Losing the race abandons the demuxer, and an abandoned one spins on its full packet queue forever, so a result that lands after the give-up still has to be drained.
+    demuxed.then((d) => { if (state === "gave-up") { d.video?.stream.resume(); d.audio?.stream.resume(); return; } state = "demuxed"; clearTimeout(timer); }, () => clearTimeout(timer));
+
+    const giveUp = new Promise<never>((_, reject) => {
+        const fail = (reason: string) => { if (state !== "waiting") return; state = "gave-up"; clearTimeout(timer); output.destroy(); reject(new Error(reason)); };
+        // A stalled source neither fails nor arrives, and nothing below would ever fire for it: ffmpeg happily waits on a connection that stays open and silent.
+        timer = setTimeout(() => fail(`the media had no readable header after ${headerTimeoutMs}ms`), headerTimeoutMs);
+        // Both outcomes count: ffmpeg rejects when it exits badly, but a source that ends before it ever had a header makes it resolve instead.
+        ffmpegDone.then(() => fail("ffmpeg exited before the media had a readable header"), () => fail("ffmpeg failed before the media had a readable header"));
+        if (signal.aborted) fail("playback was torn down before the media had a readable header");
+        else signal.addEventListener("abort", () => fail("playback was torn down before the media had a readable header"), { once: true });
+    });
+
+    return Promise.race([demuxed, giveUp]);
 }
 
 /** Owns the selfbot client and the single go-live stream it can have at a time. */
@@ -183,7 +208,7 @@ export class StreamSession {
         let demuxed: { video?: any; audio?: any } = {};
 
         try {
-            demuxed = await demux(output, { format: "nut" });
+            demuxed = await demuxOrGiveUp(output, ffmpegDone, ac.signal);
             const { video, audio } = demuxed;
             if (ac.signal.aborted || !this.streamConn) return;
             if (!video) throw new Error("No video stream in media");
