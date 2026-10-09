@@ -11,7 +11,7 @@ const { VideoStream } = await import(_libBase + "dist/media/VideoStream.js");
 const { AudioStream } = await import(_libBase + "dist/media/AudioStream.js");
 const { AVCodecID } = await import(_libBase + "dist/media/LibavCodecId.js");
 
-const videoCodecMap: Record<number, string> = { [AVCodecID.AV_CODEC_ID_H264]: "H264", [AVCodecID.AV_CODEC_ID_H265]: "H265", [AVCodecID.AV_CODEC_ID_VP8]: "VP8", [AVCodecID.AV_CODEC_ID_VP9]: "VP9", [AVCodecID.AV_CODEC_ID_AV1]: "AV1" };
+const videoCodecMap: Record<number, string | undefined> = { [AVCodecID.AV_CODEC_ID_H264]: "H264", [AVCodecID.AV_CODEC_ID_H265]: "H265", [AVCodecID.AV_CODEC_ID_VP8]: "VP8", [AVCodecID.AV_CODEC_ID_VP9]: "VP9", [AVCodecID.AV_CODEC_ID_AV1]: "AV1" };
 
 /** One thing to play: `label` identifies it for dedupe and logs, `open` yields the ffmpeg input and may tie child processes to the playback's signal. */
 export interface PlaybackSource { label: string; open: (signal: AbortSignal) => string | Readable; prepareOptions: Partial<PrepareStreamOptions> }
@@ -38,7 +38,7 @@ export class StreamSession {
     private readonly streamer = new Streamer(this.client);
     private playbackAbort: AbortController | null = null;
     private streamConn: any = null;
-    private packetizerReady = false;
+    private packetizerCodec: string | null = null;
     private active: ActiveRequest | null = null;
 
     /** Plays `source`, joining or swapping as needed. Logs and ignores the request if it is already playing. */
@@ -90,7 +90,7 @@ export class StreamSession {
         console.log("Stopping stream...");
         this.playbackAbort?.abort();
         this.playbackAbort = null;
-        if (this.streamConn) { this.streamer.stopStream(); this.streamConn = null; this.packetizerReady = false; }
+        if (this.streamConn) { this.streamer.stopStream(); this.streamConn = null; this.packetizerCodec = null; }
         this.streamer.leaveVoice();
         this.active = null;
         console.log("Left voice channel.");
@@ -186,10 +186,14 @@ export class StreamSession {
             if (ac.signal.aborted || !this.streamConn) return;
             if (!video) throw new Error("No video stream in media");
 
-            if (!this.packetizerReady) {
-                this.streamConn.setPacketizer(videoCodecMap[video.codec]);
+            const codec = videoCodecMap[video.codec];
+            if (!codec) throw new Error(`Unsupported video codec in media: ${video.codec}`);
+            // setPacketizer cannot be called twice on one go-live: it resets the RTP sequence numbers of the reused native track, which trips SRTP anti-replay and segfaults. So a source with a different codec cannot join the live stream; stop instead, and the next request builds a go-live for it.
+            if (this.packetizerCodec && this.packetizerCodec !== codec) throw new Error(`Live stream is packetized as ${this.packetizerCodec}, cannot switch to ${codec}. Stopping; run the command again to start a new stream.`);
+            if (!this.packetizerCodec) {
+                this.streamConn.setPacketizer(codec);
                 this.streamConn.mediaConnection.setSpeaking(true);
-                this.packetizerReady = true;
+                this.packetizerCodec = codec;
             }
             this.streamConn.mediaConnection.setVideoAttributes(true, { width: video.width, height: video.height, fps: Math.round(video.framerate_num / video.framerate_den) });
 
