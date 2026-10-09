@@ -26,9 +26,8 @@ session.client.on("messageCreate", (message) => {
     const content = message.content.trim();
     const lower = content.toLowerCase();
 
-    if (lower.startsWith("!start")) {
-        const arg = content.slice(6).trim() || null;
-        const key = arg ?? videoKeys[0]!;
+    if (lower === "!start" || lower.startsWith("!start ")) {
+        const key = content.slice(6).trim() || videoKeys[0]!;
         const videoPath = videos[key];
 
         if (!videoPath) {
