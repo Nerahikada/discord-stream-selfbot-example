@@ -1,5 +1,7 @@
-import { spawn } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
+const execFileAsync = promisify(execFile);
 const ytdlpPath = process.env.YTDLP_PATH ?? "yt-dlp";
 const resolveTimeoutMs = 30_000;
 
@@ -8,23 +10,18 @@ export interface MediaTrack { url: string; headers: Record<string, string> }
 /** A resolved source. `audio` is null when the site serves one muxed file, in which case `video` carries both. */
 export interface ResolvedMedia { video: MediaTrack; audio: MediaTrack | null; title: string; height: number | null; fps: number | null; isLive: boolean }
 
-function runYtDlp(args: string[]): Promise<string> {
-    return new Promise((resolve, reject) => {
-        const child = spawn(ytdlpPath, args, { stdio: ["ignore", "pipe", "pipe"] });
-        const stdout: Buffer[] = [];
-        const stderr: Buffer[] = [];
-        const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new Error(`yt-dlp timed out after ${resolveTimeoutMs}ms`)); }, resolveTimeoutMs);
-
-        child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
-        child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
-        child.on("error", (e) => { clearTimeout(timer); reject(new Error(`could not run ${ytdlpPath}: ${e.message}`)); });
-        child.on("close", (code) => {
-            clearTimeout(timer);
-            if (code === 0) { resolve(Buffer.concat(stdout).toString("utf-8")); return; }
-            const lastLine = Buffer.concat(stderr).toString("utf-8").trim().split("\n").at(-1) ?? "";
-            reject(new Error(`yt-dlp exited with ${code}: ${lastLine}`));
-        });
-    });
+async function runYtDlp(args: string[]): Promise<string> {
+    try {
+        // A full info dict runs to hundreds of KB (a plain YouTube video measured 660KB), so the 1MB default ceiling is within reach of a single lookup.
+        const { stdout } = await execFileAsync(ytdlpPath, args, { timeout: resolveTimeoutMs, killSignal: "SIGKILL", maxBuffer: 64 * 1024 * 1024 });
+        return stdout;
+    } catch (e) {
+        const err = e as NodeJS.ErrnoException & { killed?: boolean; stderr?: string };
+        if (err.killed) throw new Error(`yt-dlp timed out after ${resolveTimeoutMs}ms`);
+        // A numeric code means yt-dlp ran and rejected the URL, so its own last line is the useful message; anything else failed before or around the process itself.
+        if (typeof err.code === "number") throw new Error(`yt-dlp exited with ${err.code}: ${(err.stderr ?? "").trim().split("\n").at(-1) ?? ""}`);
+        throw new Error(`could not run ${ytdlpPath}: ${err.message}`);
+    }
 }
 
 function toTrack(format: any): MediaTrack {
