@@ -1,7 +1,15 @@
 import { existsSync, readFileSync } from "node:fs";
 import { StreamSession, voiceChannelOf } from "./core/stream.ts";
 
-const videos: Record<string, string> = JSON.parse(readFileSync(new URL("../videos.json", import.meta.url), "utf-8"));
+let videos: Record<string, string>;
+try {
+    videos = JSON.parse(readFileSync(new URL("../videos.json", import.meta.url), "utf-8"));
+} catch (e) {
+    console.error(`Could not read videos.json: ${e instanceof Error ? e.message : e}`);
+    console.error("Copy videos.example.json to videos.json and fill it in.");
+    process.exit(1);
+}
+
 const videoKeys = Object.keys(videos);
 
 if (videoKeys.length === 0) { console.error("No videos defined in videos.json"); process.exit(1); }
