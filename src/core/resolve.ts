@@ -53,7 +53,8 @@ export async function resolveMedia(target: string, maxHeight: number): Promise<R
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error(`unsupported protocol: ${parsed.protocol}`);
 
     // Sorting beats a fallback chain: `res` already prefers the tallest format within the cap and degrades on its own, and `vcodec` keeps the copy-mux a copy and the decode cheap.
-    const raw = await runYtDlp(["-j", "--no-playlist", "--no-warnings", "-f", "bv*+ba/b", "-S", `res:${maxHeight},vcodec:h264`, target]);
+    // `proto` last, to prefer HLS: a progressive googlevideo URL rejects ffmpeg's unbounded `Range: bytes=0-` with a 403 on roughly one lookup in seven, while HLS asks for one bounded segment at a time. Still only a preference, so a source without an HLS rendition degrades to progressive.
+    const raw = await runYtDlp(["-j", "--no-playlist", "--no-warnings", "-f", "bv*+ba/b", "-S", `res:${maxHeight},vcodec:h264,proto:m3u8`, target]);
     const line = raw.trim().split("\n")[0];
     if (!line) throw new Error("yt-dlp returned no metadata");
     const info = JSON.parse(line);

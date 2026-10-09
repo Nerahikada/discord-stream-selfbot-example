@@ -29,6 +29,8 @@ export function remux(video: MediaTrack, audio: MediaTrack | null, signal: Abort
     } else {
         args.push("-map", "0:v:0", "-map", "0:a:0?");
     }
+    // YouTube's h264 HLS renditions hand over video packets with no PTS and nut rejects them outright. DTS is there, so fill PTS in from it, and the guard leaves a packet that already has one untouched: forcing PTS=DTS unconditionally would reorder anything carrying B-frames.
+    args.push("-bsf:v", "setts=pts=if(eq(PTS\\,NOPTS)\\,DTS\\,PTS)");
     // nut, not matroska: HLS carries AAC as ADTS with no out-of-band extradata, and the matroska muxer refuses to write a header without it, which is how every live source arrives.
     args.push("-c", "copy", "-f", "nut", "pipe:1");
 
