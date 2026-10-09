@@ -29,16 +29,17 @@ export function remux(video: MediaTrack, audio: MediaTrack | null, signal: Abort
     args.push("-c", "copy", "-f", "nut", "pipe:1");
 
     const child = spawn(ffmpegPath, args, { stdio: ["ignore", "pipe", "pipe"], signal });
-    const stderr: Buffer[] = [];
+    let stderrTail = "";
 
-    // A long stream can log reconnect noise for hours, so keep only enough tail to explain a failure.
-    child.stderr.on("data", (chunk: Buffer) => { stderr.push(chunk); if (stderr.length > 32) stderr.shift(); });
+    // A long stream can log reconnect noise for hours, so keep only enough tail to explain a failure. setEncoding decodes through a StringDecoder, so a multi-byte character split across chunks survives.
+    child.stderr.setEncoding("utf-8");
+    child.stderr.on("data", (chunk: string) => { stderrTail = (stderrTail + chunk).slice(-2000); });
     child.on("error", (e) => { if (!signal.aborted) console.error("Remux ffmpeg failed to start:", e); });
     // The transcoder closing its stdin first is normal teardown, and an unhandled EPIPE here would take the process down.
     child.stdout.on("error", () => {});
     child.on("close", (code) => {
         if (code === 0 || signal.aborted) return;
-        const message = Buffer.concat(stderr).toString("utf-8").trim().split("\n").at(-1);
+        const message = stderrTail.trim().split("\n").at(-1);
         if (message) console.error(`Remux ffmpeg exited with ${code}: ${message}`);
     });
 
