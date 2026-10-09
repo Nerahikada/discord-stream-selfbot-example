@@ -224,6 +224,9 @@ export class StreamSession {
             }
             this.streamConn.mediaConnection.setVideoAttributes(true, { width: video.width, height: video.height, fps: Math.round(video.framerate_num / video.framerate_den) });
 
+            // The go-live carries exactly what this reports, so "no audio" complaints can be placed above or below this line without reaching for ffmpeg: a media with no audio track never had any to send.
+            console.log(`Sending ${video.width}x${video.height} ${codec} ${audio ? "with audio" : "with NO audio: the media carries no audio track"}`);
+
             const vStream = new VideoStream(this.streamConn);
             video.stream.pipe(vStream);
             let aStream: any = null;
