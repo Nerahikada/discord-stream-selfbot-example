@@ -35,7 +35,7 @@ session.client.on("messageCreate", (message) => {
         const voiceChannelId = voiceChannelOf(message, "!start");
         if (!voiceChannelId) return;
 
-        session.request(message.guild.id, voiceChannelId, { label: key, input: videoPath, prepareOptions }, { command: "!start", requester: message.author.tag });
+        session.request(message.guild.id, voiceChannelId, { label: key, open: () => videoPath, prepareOptions }, { command: "!start", requester: message.author.tag });
     }
 
     if (lower === "!stop") session.handleStop(message);

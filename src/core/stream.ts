@@ -3,6 +3,7 @@ import type { Collection, GuildMember, Message } from "@lng2004/discord.js-selfb
 import { Streamer, prepareStream, demux } from "@dank074/discord-video-stream";
 import type { PrepareStreamOptions } from "@dank074/discord-video-stream";
 import { createRequire } from "node:module";
+import type { Readable } from "node:stream";
 
 const _require = createRequire(import.meta.url);
 const _libBase = _require.resolve("@dank074/discord-video-stream").replace(/dist\/index\.js$/, "");
@@ -12,8 +13,8 @@ const { AVCodecID } = await import(_libBase + "dist/media/LibavCodecId.js");
 
 const videoCodecMap: Record<number, string> = { [AVCodecID.AV_CODEC_ID_H264]: "H264", [AVCodecID.AV_CODEC_ID_H265]: "H265", [AVCodecID.AV_CODEC_ID_VP8]: "VP8", [AVCodecID.AV_CODEC_ID_VP9]: "VP9", [AVCodecID.AV_CODEC_ID_AV1]: "AV1" };
 
-/** One thing to play: `label` identifies it for dedupe and logs, `input` is handed to ffmpeg. */
-export interface PlaybackSource { label: string; input: string; prepareOptions: Partial<PrepareStreamOptions> }
+/** One thing to play: `label` identifies it for dedupe and logs, `open` yields the ffmpeg input and may tie child processes to the playback's signal. */
+export interface PlaybackSource { label: string; open: (signal: AbortSignal) => string | Readable; prepareOptions: Partial<PrepareStreamOptions> }
 
 export interface RequestContext { command: string; requester: string }
 
@@ -166,10 +167,10 @@ export class StreamSession {
 
         console.log(`Starting video playback: ${source.label}`);
 
-        // Can throw synchronously, and it runs before the teardown block below exists, so a failure here has to clean up on its own rather than becoming an unhandled rejection.
+        // Both of these can throw synchronously, and they run before the teardown block below exists, so a failure here has to clean up on its own rather than becoming an unhandled rejection.
         let prepared: ReturnType<typeof prepareStream>;
         try {
-            prepared = prepareStream(source.input, source.prepareOptions, ac.signal);
+            prepared = prepareStream(source.open(ac.signal), source.prepareOptions, ac.signal);
         } catch (e) {
             console.error("Failed to start playback:", e);
             ac.abort();
@@ -213,7 +214,7 @@ export class StreamSession {
         } catch (e) {
             if (!ac.signal.aborted) console.error("Playback error:", e);
         } finally {
-            // Must come first: on the paths that get here without an abort (playback error, or a bail-out before streaming began) nothing else stops ffmpeg, and destroying `output` alone does not reliably make it exit.
+            // Must come first: on the paths that get here without an abort (playback error, or a bail-out before streaming began) nothing else stops ffmpeg, and destroying `output` alone does not reliably make it exit. This also tears down whatever child processes `open` tied to the signal.
             ac.abort();
             // The demuxer only tears itself down once it reads EOF, and it cannot reach that read until its packet queue is drained. Leaving a full queue behind keeps it spinning at 100% CPU forever.
             output.destroy();
