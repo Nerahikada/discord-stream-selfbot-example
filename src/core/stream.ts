@@ -38,6 +38,8 @@ export class StreamSession {
     private activeGuildId: string | null = null;
     private activeChannelId: string | null = null;
     private activeLabel: string | null = null;
+    // Bumped on every request and every stop, so an in-flight join can tell it has been superseded. The label alone cannot: replaying the same one ("a", stop, "a") looks unchanged.
+    private generation = 0;
 
     /** Plays `source`, joining or swapping as needed. Logs and ignores the request if it is already playing. */
     request(guildId: string, channelId: string, source: PlaybackSource, ctx: RequestContext): void {
@@ -59,14 +61,16 @@ export class StreamSession {
             console.log(`Joining voice channel ${channelId} to play "${source.label}" at the request of ${ctx.requester}`);
         }
 
+        const generation = ++this.generation;
         this.activeGuildId = guildId;
         this.activeChannelId = channelId;
         this.activeLabel = source.label;
 
+        // Deliberately not awaited: both drive the stream in the background. The catch only exists so an unexpected throw cannot take the process down.
         if (sameChannel) {
-            this.startPlayback(source);
+            this.startPlayback(source).catch((e) => console.error("Playback failed:", e));
         } else {
-            this.startStreaming(guildId, channelId, source);
+            this.startStreaming(generation, guildId, channelId, source).catch((e) => console.error("Streaming failed:", e));
         }
     }
 
@@ -84,6 +88,7 @@ export class StreamSession {
 
     stop(): void {
         console.log("Stopping stream...");
+        this.generation += 1;
         this.playbackAbort?.abort();
         this.playbackAbort = null;
         if (this.streamConn) { this.streamer.stopStream(); this.streamConn = null; this.packetizerReady = false; }
@@ -125,32 +130,34 @@ export class StreamSession {
         this.client.login(token);
     }
 
-    private async startStreaming(guildId: string, channelId: string, source: PlaybackSource): Promise<void> {
-        const expectedLabel = this.activeLabel;
-
+    private async startStreaming(generation: number, guildId: string, channelId: string, source: PlaybackSource): Promise<void> {
         try {
             await this.streamer.joinVoice(guildId, channelId);
-            if (this.activeLabel !== expectedLabel) return;
+            // A stop() during the join already called leaveVoice, but this join landed after it, so undo it here. If something else is active instead, a newer request owns the connection and it must be left alone.
+            if (this.generation !== generation) { if (!this.activeLabel) this.streamer.leaveVoice(); return; }
             const joinedChannel = this.client.channels.cache.get(channelId);
             if (joinedChannel instanceof StageChannel) await this.client.user?.voice?.setSuppressed(false);
             console.log(`Joined voice channel ${channelId} in guild ${guildId}`);
         } catch (e) {
             console.error("Failed to join voice channel:", e);
-            if (this.activeLabel === expectedLabel) { this.activeChannelId = null; this.activeGuildId = null; this.activeLabel = null; }
+            if (this.generation === generation) { this.activeChannelId = null; this.activeGuildId = null; this.activeLabel = null; }
             return;
         }
 
+        // Held locally until the generation check passes, so a stale join cannot overwrite the connection a newer request already published.
+        let conn: any;
         try {
-            this.streamConn = await this.streamer.createStream();
-            if (this.activeLabel !== expectedLabel) { this.streamer.stopStream(); this.streamConn = null; return; }
-            console.log("Go-live stream created");
+            conn = await this.streamer.createStream();
         } catch (e) {
             console.error("Failed to create go-live stream:", e);
-            if (this.activeLabel === expectedLabel) { this.streamer.leaveVoice(); this.streamConn = null; this.activeChannelId = null; this.activeGuildId = null; this.activeLabel = null; }
+            if (this.generation === generation) { this.streamer.leaveVoice(); this.activeChannelId = null; this.activeGuildId = null; this.activeLabel = null; }
             return;
         }
+        if (this.generation !== generation) { if (!this.activeLabel) { this.streamer.stopStream(); this.streamer.leaveVoice(); } return; }
+        this.streamConn = conn;
+        console.log("Go-live stream created");
 
-        this.startPlayback(source);
+        await this.startPlayback(source);
     }
 
     private async startPlayback(source: PlaybackSource): Promise<void> {
@@ -158,7 +165,19 @@ export class StreamSession {
         this.playbackAbort = ac;
 
         console.log(`Starting video playback: ${source.label}`);
-        const { output, promise: ffmpegDone } = prepareStream(source.input, source.prepareOptions, ac.signal);
+
+        // Can throw synchronously, and it runs before the teardown block below exists, so a failure here has to clean up on its own rather than becoming an unhandled rejection.
+        let prepared: ReturnType<typeof prepareStream>;
+        try {
+            prepared = prepareStream(source.input, source.prepareOptions, ac.signal);
+        } catch (e) {
+            console.error("Failed to start playback:", e);
+            ac.abort();
+            if (this.playbackAbort === ac) this.stop();
+            return;
+        }
+
+        const { output, promise: ffmpegDone } = prepared;
         let demuxed: { video?: any; audio?: any } = {};
 
         try {
@@ -194,10 +213,13 @@ export class StreamSession {
         } catch (e) {
             if (!ac.signal.aborted) console.error("Playback error:", e);
         } finally {
+            // Must come first: on the paths that get here without an abort (playback error, or a bail-out before streaming began) nothing else stops ffmpeg, and destroying `output` alone does not reliably make it exit.
+            ac.abort();
             // The demuxer only tears itself down once it reads EOF, and it cannot reach that read until its packet queue is drained. Leaving a full queue behind keeps it spinning at 100% CPU forever.
             output.destroy();
             demuxed.video?.stream.resume();
             demuxed.audio?.stream.resume();
+            // Bounded by the abort above: execa escalates to SIGKILL 5s after the SIGTERM, so this settles even if ffmpeg ignores the signal.
             await ffmpegDone.catch(() => {});
             if (this.playbackAbort === ac) this.stop();
         }
