@@ -1,0 +1,4 @@
+{
+  "main": "/path/to/video.ts",
+  "lofi": "/path/to/another.mp4"
+}

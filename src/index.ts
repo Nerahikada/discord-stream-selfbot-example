@@ -12,14 +12,13 @@ const { AVCodecID } = await import(_libBase + "dist/media/LibavCodecId.js");
 
 const videoCodecMap: Record<number, string> = { [AVCodecID.AV_CODEC_ID_H264]: "H264", [AVCodecID.AV_CODEC_ID_H265]: "H265", [AVCodecID.AV_CODEC_ID_VP8]: "VP8", [AVCodecID.AV_CODEC_ID_VP9]: "VP9", [AVCodecID.AV_CODEC_ID_AV1]: "AV1" };
 
-interface Config { token: string; videos: Record<string, string> }
+const videos: Record<string, string> = JSON.parse(readFileSync(new URL("../videos.json", import.meta.url), "utf-8"));
+const videoKeys = Object.keys(videos);
+const token = process.env.DISCORD_TOKEN;
 
-const config: Config = JSON.parse(readFileSync(new URL("../config.json", import.meta.url), "utf-8"));
+if (!token) { console.error("Missing DISCORD_TOKEN. Copy .env.example to .env and fill it in."); process.exit(1); }
+if (videoKeys.length === 0) { console.error("No videos defined in videos.json"); process.exit(1); }
 
-if (!config.token) { console.error("Missing token in config.json"); process.exit(1); }
-if (!config.videos || Object.keys(config.videos).length === 0) { console.error("No videos defined in config.json"); process.exit(1); }
-
-const videoKeys = Object.keys(config.videos);
 const client = new Client();
 const streamer = new Streamer(client);
 
@@ -128,8 +127,8 @@ client.on("messageCreate", (message) => {
 
     if (lower.startsWith("!start")) {
         const arg = content.slice(6).trim() || null;
-        const key = arg ?? videoKeys[0];
-        const videoPath = config.videos[key];
+        const key = arg ?? videoKeys[0]!;
+        const videoPath = videos[key];
 
         if (!videoPath) {
             console.log(`Ignoring !start from ${message.author.tag}: unknown key "${key}" (available: ${videoKeys.join(", ")})`);
@@ -211,7 +210,7 @@ client.on("voiceStateUpdate", (oldState, newState) => {
 
 client.on("ready", () => {
     console.log(`Logged in as ${client.user?.tag}`);
-    console.log(`Videos: ${videoKeys.map(k => `${k} → ${config.videos[k]}`).join(", ")}`);
+    console.log(`Videos: ${videoKeys.map(k => `${k} → ${videos[k]}`).join(", ")}`);
     console.log("Commands: !start [key] / !stop");
 });
 
@@ -219,4 +218,4 @@ function shutdown(): void { stopStreaming(); client.destroy(); setTimeout(() => 
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
-client.login(config.token);
+client.login(token);
