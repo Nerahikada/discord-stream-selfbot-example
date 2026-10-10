@@ -15,8 +15,8 @@ const videoCodecMap: Record<number, string | undefined> = { [AVCodecID.AV_CODEC_
 // A header follows within a second of data actually flowing, so this only has to be loose enough to cover a slow start.
 const headerTimeoutMs = 30_000;
 
-/** One thing to play: `label` identifies it for dedupe and logs, `open` yields the ffmpeg input and may tie child processes to the playback's signal. */
-export interface PlaybackSource { label: string; open: (signal: AbortSignal) => string | Readable; prepareOptions: Partial<PrepareStreamOptions> }
+/** One thing to play: `label` identifies it for dedupe and logs, `open` yields the ffmpeg input and may tie child processes to the playback's signal. `open` is awaited, so a source can take its time settling on an input that works. */
+export interface PlaybackSource { label: string; open: (signal: AbortSignal) => string | Readable | Promise<string | Readable>; prepareOptions: Partial<PrepareStreamOptions> }
 
 export interface RequestContext { command: string; requester: string }
 
@@ -193,12 +193,12 @@ export class StreamSession {
 
         console.log(`Starting video playback: ${source.label}`);
 
-        // Both of these can throw synchronously, and they run before the teardown block below exists, so a failure here has to clean up on its own rather than becoming an unhandled rejection.
+        // Both of these can throw, and they run before the teardown block below exists, so a failure here has to clean up on its own rather than becoming an unhandled rejection. A teardown that lands while `open` is still pending surfaces here too, as prepareStream refusing an aborted signal.
         let prepared: ReturnType<typeof prepareStream>;
         try {
-            prepared = prepareStream(source.open(ac.signal), source.prepareOptions, ac.signal);
+            prepared = prepareStream(await source.open(ac.signal), source.prepareOptions, ac.signal);
         } catch (e) {
-            console.error("Failed to start playback:", e);
+            if (!ac.signal.aborted) console.error("Failed to start playback:", e);
             ac.abort();
             if (this.playbackAbort === ac) this.stop();
             return;

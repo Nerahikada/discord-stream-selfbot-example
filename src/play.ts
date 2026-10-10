@@ -6,6 +6,8 @@ const maxHeight = 720;
 const maxFps = 30;
 const bitrateVideo = 2500;
 const bitrateVideoMax = 4000;
+// Roughly one lookup in seven mints a refused URL, so two more draws leave about one playback in three hundred failing on it.
+const maxFreshLookups = 2;
 
 const session = new StreamSession();
 
@@ -42,8 +44,20 @@ session.client.on("messageCreate", async (message) => {
         // Arbitrary sources never satisfy the no-B-frame / 1s-keyframe layout Discord needs, so unlike the file bot this one has to transcode.
         const prepareOptions = { noTranscoding: false, height, frameRate, videoCodec: "H264" as const, bitrateVideo, bitrateVideoMax };
 
+        // A refused progressive URL stays refused for as long as it lives, so reopening it is pointless: the only way past is a fresh lookup, which mints new ones. This has to happen in here because `open` runs once per playback.
+        const open = async (signal: AbortSignal) => {
+            let current = media;
+            for (let lookups = 0; ; lookups++) {
+                const { output, refused } = remux(current.video, current.audio, signal);
+                if (lookups >= maxFreshLookups || !(await refused)) return output;
+                console.log(`The CDN refused the URLs resolved for "${target}", resolving again (${lookups + 1}/${maxFreshLookups})`);
+                current = await resolveMedia(target, maxHeight);
+                signal.throwIfAborted();
+            }
+        };
+
         // The resolved CDN URLs are signed and change every lookup, so the page URL is what identifies this request.
-        session.request(message.guild.id, voiceChannelId, { label: target, open: (signal) => remux(media.video, media.audio, signal), prepareOptions }, { command: "!play", requester: message.author.tag });
+        session.request(message.guild.id, voiceChannelId, { label: target, open, prepareOptions }, { command: "!play", requester: message.author.tag });
     }
 
     if (lower === "!stop") session.handleStop(message);
