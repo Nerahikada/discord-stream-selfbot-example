@@ -57,28 +57,98 @@ async function demuxOrGiveUp(output: Readable, ffmpegDone: Promise<unknown>, sig
     return Promise.race([demuxed, giveUp]);
 }
 
-/** A `Streamer` that only hears its own guild's voice states. Every session of the account receives the others' voice states too, and the stock join takes the session ID from any of them, so without this a guild could connect with another session's ID. */
-class GuildStreamer extends Streamer {
-    constructor(client: Client, guildId: string) {
+/** A `Streamer` that only hears its own session's voice states. Every session of the account receives the others' voice states too, and the stock join takes the session ID from any of them, so without this a join could connect with another session's ID. */
+class SessionStreamer extends Streamer {
+    private readonly listener: (packet: any) => void;
+
+    constructor(client: Client) {
         super(client);
-        // The listener the constructor just attached is the only way packets reach the Streamer, so wrapping it is enough.
+        // The Streamer's only input is the raw listener its constructor just attached.
         const forward = client.rawListeners("raw").at(-1) as (packet: any) => void;
         client.off("raw", forward);
-        client.on("raw", (packet: any) => { if (packet.t === "VOICE_STATE_UPDATE" && packet.d?.guild_id !== guildId) return; forward(packet); });
+        this.listener = (packet: any) => { if (packet.t === "VOICE_STATE_UPDATE" && packet.d?.session_id !== client.sessionId) return; forward(packet); };
+        client.on("raw", this.listener);
+    }
+
+    /** Stops packets reaching this Streamer, so a join or stream it left unfinished cannot react to the session's next borrower. */
+    detach(): void { this.client.off("raw", this.listener); }
+}
+
+// Discord allows a user account 50 gateway sessions, and the command client holds one of them.
+const maxStreamingSessions = 49;
+
+/** Logged-in gateway sessions to stream from, lent out one per streaming guild. One spare is kept logged in so a request never waits on a login, and any session beyond that is logged out once returned. */
+class SessionPool {
+    private readonly idle: Client[] = [];
+    private readonly all = new Set<Client>();
+    private spare: Promise<Client> | null = null;
+    private token = "";
+
+    start(token: string): void {
+        this.token = token;
+        this.warm();
+    }
+
+    /** Lends out a ready session, then starts warming a replacement spare. */
+    async acquire(): Promise<Client> {
+        let client = this.idle.pop();
+        if (!client) {
+            const spare = this.spare;
+            this.spare = null;
+            client = await (spare ?? this.login());
+        }
+        this.warm();
+        return client;
+    }
+
+    /** Takes back a session that has already left voice, keeping it as the spare or logging it out. */
+    release(client: Client): void {
+        if (this.idle.length > 0 || this.spare) { this.all.delete(client); client.destroy(); return; }
+        this.idle.push(client);
+    }
+
+    /** Logs every session out, lent or not. */
+    destroyAll(): void {
+        for (const client of this.all) client.destroy();
+        this.all.clear();
+        this.idle.length = 0;
+        this.spare = null;
+    }
+
+    private warm(): void {
+        if (this.idle.length > 0 || this.spare || this.all.size >= maxStreamingSessions) return;
+        const spare = this.login();
+        this.spare = spare;
+        spare.catch((e) => { if (this.spare === spare) this.spare = null; console.error("Failed to log in a spare streaming session:", e); });
+    }
+
+    private async login(): Promise<Client> {
+        if (this.all.size >= maxStreamingSessions) throw new Error(`all ${maxStreamingSessions} streaming sessions are in use`);
+        const client = new Client();
+        this.all.add(client);
+        try {
+            await new Promise<void>((resolve, reject) => { client.once("ready", () => resolve()); client.login(this.token).catch(reject); });
+        } catch (e) {
+            this.all.delete(client);
+            client.destroy();
+            throw e;
+        }
+        console.log(`Logged in a streaming session (${this.all.size} logged in)`);
+        return client;
     }
 }
 
-/** Owns the command client and routes each request to its guild's stream. A user account can be in only one voice channel per gateway session, so each guild streams from a session of its own, logged in with the same token. */
+/** Owns the command client and routes each request to its guild's stream. A user account can be in only one voice channel per gateway session, so each streaming guild borrows a session of its own from the pool, all logged in with the same token. */
 export class StreamSession {
     readonly client = new Client();
-    // Never evicted: a guild's session stays logged in, so its next request joins without logging in again.
+    private readonly pool = new SessionPool();
+    // Never evicted: an idle GuildSession holds no session, only its guild's ID and name.
     private readonly guilds = new Map<string, GuildSession>();
-    private token = "";
 
     /** Plays `source` in `guildId`, leaving every other guild's stream alone. */
     request(guildId: string, channelId: string, source: PlaybackSource, ctx: RequestContext): void {
         let session = this.guilds.get(guildId);
-        if (!session) { session = new GuildSession(this.token, guildId, this.client.guilds.cache.get(guildId)?.name ?? guildId); this.guilds.set(guildId, session); }
+        if (!session) { session = new GuildSession(this.pool, guildId, this.client.guilds.cache.get(guildId)?.name ?? guildId); this.guilds.set(guildId, session); }
         session.request(channelId, source, ctx);
     }
 
@@ -87,54 +157,40 @@ export class StreamSession {
         if (message.guild) this.guilds.get(message.guild.id)?.handleStop(message);
     }
 
-    /** Wires up the signal handlers, then logs the command client in with `DISCORD_TOKEN`. */
+    /** Wires up the signal handlers, then logs the command client and the first spare streaming session in with `DISCORD_TOKEN`. */
     start(): void {
         const token = process.env.DISCORD_TOKEN;
         if (!token) { console.error("Missing DISCORD_TOKEN. Copy .env.example to .env and fill it in."); process.exit(1); }
-        this.token = token;
 
-        const shutdown = () => { for (const session of this.guilds.values()) session.destroy(); this.client.destroy(); setTimeout(() => process.exit(0), 2000).unref(); };
+        const shutdown = () => { for (const session of this.guilds.values()) session.stop(); this.pool.destroyAll(); this.client.destroy(); setTimeout(() => process.exit(0), 2000).unref(); };
         process.on("SIGINT", shutdown);
         process.on("SIGTERM", shutdown);
 
         this.client.login(token);
+        this.pool.start(token);
     }
 }
 
-/** The single go-live stream one guild can have at a time, on a gateway session of its own. */
+/** A session borrowed from the pool, with the Streamer and voice-state guard this guild put on it. `channelId` is where this session's own voice states last put it in the guild: the client's cache cannot say, since every session of the account overwrites the same entry. */
+interface Lease { client: Client; streamer: SessionStreamer; onVoiceState: (oldState: VoiceState, newState: VoiceState) => void; channelId: string | null }
+
+/** The single go-live stream one guild can have at a time, on a session borrowed from the pool for as long as it streams. */
 class GuildSession {
-    private readonly client = new Client();
-    private readonly token: string;
+    private readonly pool: SessionPool;
     private readonly guildId: string;
-    private readonly streamer: GuildStreamer;
     private readonly logPrefix: string;
-    private loggedIn: Promise<void> | null = null;
+    // `leasing` is shared by every request racing for the session; `lease` is only set once it has resolved, and is what stop() tears down.
+    private leasing: Promise<Lease> | null = null;
+    private lease: Lease | null = null;
     private playbackAbort: AbortController | null = null;
     private streamConn: any = null;
     private packetizerCodec: string | null = null;
     private active: ActiveRequest | null = null;
 
-    constructor(token: string, guildId: string, guildName: string) {
-        this.token = token;
+    constructor(pool: SessionPool, guildId: string, guildName: string) {
+        this.pool = pool;
         this.guildId = guildId;
-        this.streamer = new GuildStreamer(this.client, guildId);
         this.logPrefix = `[${guildName}]`;
-        this.client.on("voiceStateUpdate", (oldState, newState) => this.handleVoiceState(oldState, newState));
-    }
-
-    /** Stops the stream and logs this guild's session out. */
-    destroy(): void {
-        this.stop();
-        this.client.destroy();
-    }
-
-    /** Resolves once the session is ready to join. A failed login is forgotten, so the next request tries again. */
-    private login(): Promise<void> {
-        this.loggedIn ??= new Promise<void>((resolve, reject) => {
-            this.client.once("ready", () => resolve());
-            this.client.login(this.token).catch(reject);
-        }).then(() => this.log(`Logged in a session for this guild as ${this.client.user?.tag}`), (e) => { this.loggedIn = null; throw e; });
-        return this.loggedIn;
     }
 
     /** Plays `source`, joining or swapping as needed. Logs and ignores the request if it is already playing. */
@@ -152,7 +208,8 @@ class GuildSession {
             if (sameChannel) {
                 this.playbackAbort?.abort();
             } else {
-                this.stop();
+                // Keeps the session: rejoining on a different one would race this one's leave, which can land after the join and read as a kick.
+                this.teardown(true);
             }
         } else {
             this.log(`Joining voice channel ${channelId} to play "${source.label}" at the request of ${ctx.requester}`);
@@ -182,28 +239,38 @@ class GuildSession {
         this.stop();
     }
 
-    /** Tears everything down. The teardown itself runs unconditionally, so a half-finished join cannot leave the session connected, but it only narrates when there was something to stop. */
-    stop(): void {
+    /** Tears everything down and hands the session back to the pool. */
+    stop(): void { this.teardown(false); }
+
+    /** The teardown itself runs unconditionally, so a half-finished join cannot leave the session connected, but it only narrates when there was something to stop. With `keepLease`, the session leaves voice but stays borrowed for the request that is about to rejoin on it. */
+    private teardown(keepLease: boolean): void {
         const wasActive = this.active !== null;
         if (wasActive) this.log("Stopping stream...");
         this.playbackAbort?.abort();
         this.playbackAbort = null;
-        if (this.streamConn) { this.streamer.stopStream(); this.streamConn = null; this.packetizerCodec = null; }
-        // A session still logging in has joined nothing, and sending on it either tears its shard down or reaches the gateway ahead of IDENTIFY.
-        if (this.client.isReady()) this.streamer.leaveVoice();
+        this.streamConn = null;
+        this.packetizerCodec = null;
         this.active = null;
+        if (keepLease) this.leaveVoice(); else this.releaseLease();
         if (wasActive) this.log("Left voice channel.");
     }
 
     /** Stops when this session is moved or kicked out of the channel it streams to, or when that channel has no humans left. */
     handleVoiceState(oldState: VoiceState, newState: VoiceState): void {
         const active = this.active;
-        if (!active) return;
+        const lease = this.lease;
+        const self = lease?.client.user?.id;
+        if (!active || !lease || !self) return;
 
-        if (oldState.id === this.client.user?.id && oldState.channelId === active.channelId && newState.channelId !== active.channelId) {
-            this.log("Bot was moved or kicked from voice channel, stopping...");
-            this.stop();
-            return;
+        // Only this session's own voice states count: the guild's previous session keeps reporting its teardown, still in the channel, after a new one is borrowed.
+        if (newState.id === self && newState.guild.id === this.guildId && newState.sessionId === lease.client.sessionId) {
+            const previous = lease.channelId;
+            lease.channelId = newState.channelId;
+            if (previous === active.channelId && newState.channelId !== active.channelId) {
+                this.log("Bot was moved or kicked from voice channel, stopping...");
+                this.stop();
+                return;
+            }
         }
 
         if (oldState.channelId !== active.channelId) return;
@@ -211,41 +278,81 @@ class GuildSession {
         if (!channel || !("members" in channel)) return;
 
         const members = channel.members as Collection<string, GuildMember>;
-        const humanMembers = members.filter((m: GuildMember) => m.id !== this.client.user?.id && !m.user.bot);
+        const humanMembers = members.filter((m: GuildMember) => m.id !== self && !m.user.bot);
         if (humanMembers.size === 0) {
             this.log("Voice channel is empty, stopping...");
             this.stop();
         }
     }
 
+    /** Borrows a session, or shares the borrow already in flight. A session that arrives after the request was stopped is returned at once. */
+    private acquireLease(): Promise<Lease> {
+        this.leasing ??= this.pool.acquire().then((client) => {
+            const streamer = new SessionStreamer(client);
+            const onVoiceState = (oldState: VoiceState, newState: VoiceState) => this.handleVoiceState(oldState, newState);
+            client.on("voiceStateUpdate", onVoiceState);
+            const lease: Lease = { client, streamer, onVoiceState, channelId: null };
+            this.lease = lease;
+            if (!this.active) this.releaseLease();
+            return lease;
+        }, (e) => { this.leasing = null; throw e; });
+        return this.leasing;
+    }
+
+    /** Ends the go-live and leaves voice on the borrowed session, if one has arrived. */
+    private leaveVoice(): void {
+        // Not gated on streamConn: stopStream is a no-op without a stream, and also tears down one still being created.
+        this.lease?.streamer.stopStream();
+        this.lease?.streamer.leaveVoice();
+    }
+
+    /** Leaves voice on the borrowed session and returns it. A borrow still in flight is left to acquireLease, which returns it on arrival if nothing is active by then. */
+    private releaseLease(): void {
+        const lease = this.lease;
+        if (!lease) return;
+        this.leaveVoice();
+        this.lease = null;
+        this.leasing = null;
+        lease.client.off("voiceStateUpdate", lease.onVoiceState);
+        lease.streamer.detach();
+        this.pool.release(lease.client);
+    }
+
+    // A flow that fails an identity check after an await returns without touching the lease: a stop() in between already tore it down and may have lent the session to another guild.
     private async startStreaming(active: ActiveRequest, source: PlaybackSource): Promise<void> {
+        let lease: Lease;
         try {
-            await this.login();
-            // A stop() while logging in has nothing to undo yet, since no join was sent.
-            if (this.active !== active) return;
-            await this.streamer.joinVoice(this.guildId, active.channelId);
-            // A stop() during the join already called leaveVoice, but this join landed after it, so undo it here. If something else is active instead, a newer request owns the connection and it must be left alone.
-            if (this.active !== active) { if (!this.active) this.streamer.leaveVoice(); return; }
-            const joinedChannel = this.client.channels.cache.get(active.channelId);
-            // Not `client.user.voice`: that is whichever guild's voice state it finds first, which is the wrong one once several guilds are streaming.
+            lease = await this.acquireLease();
+        } catch (e) {
+            this.error("Could not get a streaming session:", e);
+            if (this.active === active) this.active = null;
+            return;
+        }
+        if (this.active !== active || this.lease !== lease) return;
+
+        try {
+            await lease.streamer.joinVoice(this.guildId, active.channelId);
+            if (this.active !== active || this.lease !== lease) return;
+            const joinedChannel = lease.client.channels.cache.get(active.channelId);
+            // Not `client.user.voice`: that is whichever guild's voice state it finds first, and every session sees the account's voice states in all guilds.
             if (joinedChannel instanceof StageChannel) await joinedChannel.guild.members.me?.voice.setSuppressed(false);
             this.log(`Joined voice channel ${active.channelId}`);
         } catch (e) {
             this.error("Failed to join voice channel:", e);
-            if (this.active === active) this.active = null;
+            if (this.active === active && this.lease === lease) { this.active = null; this.releaseLease(); }
             return;
         }
 
         // Held locally until the identity check passes, so a stale join cannot overwrite the connection a newer request already published.
         let conn: any;
         try {
-            conn = await this.streamer.createStream();
+            conn = await lease.streamer.createStream();
         } catch (e) {
             this.error("Failed to create go-live stream:", e);
-            if (this.active === active) { this.streamer.leaveVoice(); this.active = null; }
+            if (this.active === active && this.lease === lease) { this.active = null; this.releaseLease(); }
             return;
         }
-        if (this.active !== active) { if (!this.active) { this.streamer.stopStream(); this.streamer.leaveVoice(); } return; }
+        if (this.active !== active || this.lease !== lease) return;
         this.streamConn = conn;
         this.log("Go-live stream created");
 
