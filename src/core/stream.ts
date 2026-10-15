@@ -87,7 +87,7 @@ export class StreamSession {
         if (message.guild) this.guilds.get(message.guild.id)?.handleStop(message);
     }
 
-    /** Wires up the voice-state guards and signal handlers, then logs in with `DISCORD_TOKEN`. */
+    /** Wires up the signal handlers, then logs the command client in with `DISCORD_TOKEN`. */
     start(): void {
         const token = process.env.DISCORD_TOKEN;
         if (!token) { console.error("Missing DISCORD_TOKEN. Copy .env.example to .env and fill it in."); process.exit(1); }
@@ -189,7 +189,8 @@ class GuildSession {
         this.playbackAbort?.abort();
         this.playbackAbort = null;
         if (this.streamConn) { this.streamer.stopStream(); this.streamConn = null; this.packetizerCodec = null; }
-        this.streamer.leaveVoice();
+        // A session still logging in has joined nothing, and sending on it either tears its shard down or reaches the gateway ahead of IDENTIFY.
+        if (this.client.isReady()) this.streamer.leaveVoice();
         this.active = null;
         if (wasActive) this.log("Left voice channel.");
     }
@@ -220,7 +221,7 @@ class GuildSession {
     private async startStreaming(active: ActiveRequest, source: PlaybackSource): Promise<void> {
         try {
             await this.login();
-            // A stop() while logging in has nothing to undo yet, since no voice state was sent.
+            // A stop() while logging in has nothing to undo yet, since no join was sent.
             if (this.active !== active) return;
             await this.streamer.joinVoice(this.guildId, active.channelId);
             // A stop() during the join already called leaveVoice, but this join landed after it, so undo it here. If something else is active instead, a newer request owns the connection and it must be left alone.
