@@ -20,6 +20,11 @@ export interface PlaybackSource { label: string; title?: string; open: (signal: 
 
 export interface RequestContext { command: string; requester: string }
 
+/** `one` replays the current source, `all` sends each source to the back of the queue once it is done. */
+export type LoopMode = "off" | "one" | "all";
+
+const loopModes: LoopMode[] = ["off", "one", "all"];
+
 /** Identity of one request. A fresh object per request, so an in-flight join can tell it has been superseded by comparing against the session's current one. `source` follows the queue as it advances. */
 interface ActiveRequest { channelId: string; source: PlaybackSource }
 
@@ -174,6 +179,11 @@ export class StreamSession {
         this.guildFor(message)?.handleShuffle(message);
     }
 
+    /** Handles a `!loop` message by passing it to the stream in the guild it was sent from. */
+    handleLoop(message: Message, mode: LoopMode | null): void {
+        this.guildFor(message)?.handleLoop(message, mode);
+    }
+
     /** Logs what the guild a message was sent from is playing and what is queued behind it. */
     logQueue(message: Message, command: string): void {
         this.guildOf(message, command)?.logQueue(false);
@@ -232,6 +242,7 @@ class GuildSession {
     private active: ActiveRequest | null = null;
     // What plays after `active.source`, in order. Emptied whenever the stream stops.
     private readonly queue: PlaybackSource[] = [];
+    private loop: LoopMode = "off";
 
     constructor(pool: SessionPool, guildId: string, guildName: string) {
         this.pool = pool;
@@ -288,7 +299,7 @@ class GuildSession {
     logQueue(currentOnly: boolean): void {
         const active = this.active;
         if (!active) { this.log("Nothing is playing"); return; }
-        this.log(`Now playing: ${describe(active.source)}`);
+        this.log(`Now playing: ${describe(active.source)}${this.loop === "off" ? "" : ` [loop: ${this.loop}]`}`);
         if (currentOnly) return;
         if (this.queue.length === 0) { this.log("The queue is empty"); return; }
         this.log(`Queue (${this.queue.length}):\n${this.queue.map((source, i) => `  ${i + 1}. ${describe(source)}`).join("\n")}`);
@@ -312,7 +323,7 @@ class GuildSession {
         }
         this.log(`Received !skip from ${message.author.tag}, skipping ${describe(active.source)}`);
         this.playbackAbort?.abort();
-        this.playNext();
+        this.playNext("skipped");
     }
 
     /** Handles a `!shuffle` message from a listener by shuffling what is queued, leaving what is playing alone. */
@@ -324,6 +335,13 @@ class GuildSession {
             [queue[i], queue[j]] = [queue[j]!, queue[i]!];
         }
         this.log(`Received !shuffle from ${message.author.tag}, shuffled ${queue.length} queued`);
+    }
+
+    /** Handles a `!loop` message from a listener by switching to `mode`, or to the one after the current mode if none is given. */
+    handleLoop(message: Message, mode: LoopMode | null): void {
+        if (!this.fromListener(message, "!loop")) return;
+        this.loop = mode ?? loopModes[(loopModes.indexOf(this.loop) + 1) % loopModes.length]!;
+        this.log(`Received !loop from ${message.author.tag}, loop is now ${this.loop}`);
     }
 
     /** Returns what is playing if the message author is listening in the channel being streamed to, logging why not otherwise. Says nothing when nothing is playing. */
@@ -354,17 +372,26 @@ class GuildSession {
         if (wasActive) this.log("Left voice channel.");
     }
 
-    /** Drops what is playing and everything queued behind it. */
+    /** Drops what is playing, everything queued behind it, and the loop mode. */
     private forget(): void {
         this.active = null;
         this.queue.length = 0;
+        this.loop = "off";
     }
 
-    /** Moves on to the next queued source on the same go-live, or stops once the queue has run out. */
-    private playNext(): void {
+    /** Moves on to whatever the loop mode puts next on the same go-live, or stops once the queue has run out. */
+    private playNext(ended: "finished" | "failed" | "skipped"): void {
         const active = this.active;
+        if (!active || !this.streamConn) { this.stop(); return; }
+        // A source that failed is never played again, or one broken source would loop forever.
+        if (this.loop === "one" && ended === "finished") {
+            this.log(`Replaying ${describe(active.source)}`);
+            this.startPlayback(active.source).catch((e) => this.error("Playback failed:", e));
+            return;
+        }
+        if (this.loop === "all" && ended !== "failed") this.queue.push(active.source);
         const next = this.queue.shift();
-        if (!active || !next || !this.streamConn) { this.stop(); return; }
+        if (!next) { this.stop(); return; }
         active.source = next;
         this.log(`Moving on to "${next.label}" (${this.queue.length} left in the queue)`);
         this.startPlayback(next).catch((e) => this.error("Playback failed:", e));
@@ -487,12 +514,13 @@ class GuildSession {
         } catch (e) {
             if (!ac.signal.aborted) this.error("Failed to start playback:", e);
             ac.abort();
-            if (this.playbackAbort === ac) this.playNext();
+            if (this.playbackAbort === ac) this.playNext("failed");
             return;
         }
 
         const { output, promise: ffmpegDone } = prepared;
         let demuxed: { video?: any; audio?: any } = {};
+        let failed = false;
 
         try {
             demuxed = await demuxOrGiveUp(output, ffmpegDone, ac.signal);
@@ -532,7 +560,7 @@ class GuildSession {
             video.stream.unpipe(vStream);
             if (aStream) audio.stream.unpipe(aStream);
         } catch (e) {
-            if (!ac.signal.aborted) this.error("Playback error:", e);
+            if (!ac.signal.aborted) { this.error("Playback error:", e); failed = true; }
         } finally {
             // Must come first: on the paths that get here without an abort (playback error, or a bail-out before streaming began) nothing else stops ffmpeg, and destroying `output` alone does not reliably make it exit. This also tears down whatever child processes `open` tied to the signal.
             ac.abort();
@@ -542,7 +570,7 @@ class GuildSession {
             demuxed.audio?.stream.resume();
             // Bounded by the abort above: execa escalates to SIGKILL 5s after the SIGTERM, so this settles even if ffmpeg ignores the signal.
             await ffmpegDone.catch(() => {});
-            if (this.playbackAbort === ac) this.playNext();
+            if (this.playbackAbort === ac) this.playNext(failed ? "failed" : "finished");
         }
     }
 

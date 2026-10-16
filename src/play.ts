@@ -1,4 +1,5 @@
 import { StreamSession, voiceChannelOf } from "./core/stream.ts";
+import type { LoopMode } from "./core/stream.ts";
 import { resolveMedia } from "./core/resolve.ts";
 import type { ResolvedMedia } from "./core/resolve.ts";
 import { remux } from "./core/remux.ts";
@@ -70,13 +71,21 @@ session.client.on("messageCreate", async (message) => {
     if (lower === "!stop") session.handleStop(message);
     if (lower === "!skip") session.handleSkip(message);
     if (lower === "!shuffle") session.handleShuffle(message);
+    if (lower === "!loop" || lower.startsWith("!loop ")) {
+        const arg = lower.slice(5).trim();
+        if (arg && arg !== "off" && arg !== "one" && arg !== "all") {
+            console.log(`Ignoring !loop from ${message.author.tag}: unknown mode "${arg}" (expected off, one or all)`);
+            return;
+        }
+        session.handleLoop(message, (arg || null) as LoopMode | null);
+    }
     if (lower === "!queue") session.logQueue(message, "!queue");
     if (lower === "!np") session.logNowPlaying(message, "!np");
 });
 
 session.client.on("ready", () => {
     console.log(`Logged in as ${session.client.user?.tag}`);
-    console.log("Commands: !play <URL> / !stop / !skip / !shuffle / !queue / !np");
+    console.log("Commands: !play <URL> / !stop / !skip / !shuffle / !loop [off|one|all] / !queue / !np");
 });
 
 session.start();
