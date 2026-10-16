@@ -20,8 +20,8 @@ export interface PlaybackSource { label: string; open: (signal: AbortSignal) => 
 
 export interface RequestContext { command: string; requester: string }
 
-/** Identity of one request. A fresh object per request, so an in-flight join can tell it has been superseded by comparing against the session's current one. */
-interface ActiveRequest { channelId: string; label: string }
+/** Identity of one request. A fresh object per request, so an in-flight join can tell it has been superseded by comparing against the session's current one. `source` follows the queue as it advances. */
+interface ActiveRequest { channelId: string; source: PlaybackSource }
 
 /** Returns the voice channel the message author sits in, or null (logging why) if they are not in one. */
 export function voiceChannelOf(message: Message, command: string): string | null {
@@ -147,9 +147,12 @@ export class StreamSession {
 
     /** Plays `source` in `guildId`, leaving every other guild's stream alone. */
     request(guildId: string, channelId: string, source: PlaybackSource, ctx: RequestContext): void {
-        let session = this.guilds.get(guildId);
-        if (!session) { session = new GuildSession(this.pool, guildId, this.client.guilds.cache.get(guildId)?.name ?? guildId); this.guilds.set(guildId, session); }
-        session.request(channelId, source, ctx);
+        this.guildSession(guildId).request(channelId, source, ctx);
+    }
+
+    /** Queues `source` behind whatever `guildId` is playing, or plays it at once if nothing is. */
+    enqueue(guildId: string, channelId: string, source: PlaybackSource, ctx: RequestContext): void {
+        this.guildSession(guildId).enqueue(channelId, source, ctx);
     }
 
     /** Handles a `!stop` message by passing it to the stream in the guild it was sent from. */
@@ -169,6 +172,12 @@ export class StreamSession {
         this.client.login(token);
         this.pool.start(token);
     }
+
+    private guildSession(guildId: string): GuildSession {
+        let session = this.guilds.get(guildId);
+        if (!session) { session = new GuildSession(this.pool, guildId, this.client.guilds.cache.get(guildId)?.name ?? guildId); this.guilds.set(guildId, session); }
+        return session;
+    }
 }
 
 /** A session borrowed from the pool, with the Streamer and voice-state guard this guild put on it. `channelId` is where this session's own voice states last put it in the guild: the client's cache cannot say, since every session of the account overwrites the same entry. */
@@ -186,6 +195,8 @@ class GuildSession {
     private streamConn: any = null;
     private packetizerCodec: string | null = null;
     private active: ActiveRequest | null = null;
+    // What plays after `active.source`, in order. Emptied whenever the stream stops.
+    private readonly queue: PlaybackSource[] = [];
 
     constructor(pool: SessionPool, guildId: string, guildName: string) {
         this.pool = pool;
@@ -199,12 +210,12 @@ class GuildSession {
         let sameChannel = false;
 
         if (previous) {
-            if (source.label === previous.label) {
+            if (source.label === previous.source.label) {
                 this.log(`Ignoring ${ctx.command} from ${ctx.requester}: "${source.label}" is already playing`);
                 return;
             }
             sameChannel = !!this.streamConn && channelId === previous.channelId;
-            this.log(`Swapping from "${previous.label}" to "${source.label}" at the request of ${ctx.requester}${sameChannel ? "" : " (changing channel)"}`);
+            this.log(`Swapping from "${previous.source.label}" to "${source.label}" at the request of ${ctx.requester}${sameChannel ? "" : " (changing channel)"}`);
             if (sameChannel) {
                 this.playbackAbort?.abort();
             } else {
@@ -215,7 +226,7 @@ class GuildSession {
             this.log(`Joining voice channel ${channelId} to play "${source.label}" at the request of ${ctx.requester}`);
         }
 
-        const active: ActiveRequest = { channelId, label: source.label };
+        const active: ActiveRequest = { channelId, source };
         this.active = active;
 
         // Deliberately not awaited: both drive the stream in the background. The catch only exists so an unexpected throw cannot take the process down.
@@ -224,6 +235,18 @@ class GuildSession {
         } else {
             this.startStreaming(active, source).catch((e) => this.error("Streaming failed:", e));
         }
+    }
+
+    /** Queues `source` behind whatever is playing, or plays it at once if nothing is. A request from outside the streamed channel is ignored, since nobody there would hear what it queues. */
+    enqueue(channelId: string, source: PlaybackSource, ctx: RequestContext): void {
+        const active = this.active;
+        if (!active) { this.request(channelId, source, ctx); return; }
+        if (channelId !== active.channelId) {
+            this.log(`Ignoring ${ctx.command} from ${ctx.requester}: not in the voice channel being streamed to`);
+            return;
+        }
+        this.queue.push(source);
+        this.log(`Queued "${source.label}" at position ${this.queue.length} at the request of ${ctx.requester}`);
     }
 
     /** Handles a `!stop` message, ignoring it unless the author is listening in the channel being streamed to. */
@@ -250,9 +273,25 @@ class GuildSession {
         this.playbackAbort = null;
         this.streamConn = null;
         this.packetizerCodec = null;
-        this.active = null;
+        this.forget();
         if (keepLease) this.leaveVoice(); else this.releaseLease();
         if (wasActive) this.log("Left voice channel.");
+    }
+
+    /** Drops what is playing and everything queued behind it. */
+    private forget(): void {
+        this.active = null;
+        this.queue.length = 0;
+    }
+
+    /** Moves on to the next queued source on the same go-live, or stops once the queue has run out. */
+    private playNext(): void {
+        const active = this.active;
+        const next = this.queue.shift();
+        if (!active || !next || !this.streamConn) { this.stop(); return; }
+        active.source = next;
+        this.log(`Moving on to "${next.label}" (${this.queue.length} left in the queue)`);
+        this.startPlayback(next).catch((e) => this.error("Playback failed:", e));
     }
 
     /** Stops when this session is moved or kicked out of the channel it streams to, or when that channel has no humans left. */
@@ -325,7 +364,7 @@ class GuildSession {
             lease = await this.acquireLease();
         } catch (e) {
             this.error("Could not get a streaming session:", e);
-            if (this.active === active) this.active = null;
+            if (this.active === active) this.forget();
             return;
         }
         if (this.active !== active || this.lease !== lease) return;
@@ -339,7 +378,7 @@ class GuildSession {
             this.log(`Joined voice channel ${active.channelId}`);
         } catch (e) {
             this.error("Failed to join voice channel:", e);
-            if (this.active === active && this.lease === lease) { this.active = null; this.releaseLease(); }
+            if (this.active === active && this.lease === lease) { this.forget(); this.releaseLease(); }
             return;
         }
 
@@ -349,7 +388,7 @@ class GuildSession {
             conn = await lease.streamer.createStream();
         } catch (e) {
             this.error("Failed to create go-live stream:", e);
-            if (this.active === active && this.lease === lease) { this.active = null; this.releaseLease(); }
+            if (this.active === active && this.lease === lease) { this.forget(); this.releaseLease(); }
             return;
         }
         if (this.active !== active || this.lease !== lease) return;
@@ -372,7 +411,7 @@ class GuildSession {
         } catch (e) {
             if (!ac.signal.aborted) this.error("Failed to start playback:", e);
             ac.abort();
-            if (this.playbackAbort === ac) this.stop();
+            if (this.playbackAbort === ac) this.playNext();
             return;
         }
 
@@ -427,7 +466,7 @@ class GuildSession {
             demuxed.audio?.stream.resume();
             // Bounded by the abort above: execa escalates to SIGKILL 5s after the SIGTERM, so this settles even if ffmpeg ignores the signal.
             await ffmpegDone.catch(() => {});
-            if (this.playbackAbort === ac) this.stop();
+            if (this.playbackAbort === ac) this.playNext();
         }
     }
 
