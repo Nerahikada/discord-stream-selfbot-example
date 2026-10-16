@@ -79,13 +79,22 @@ session.client.on("messageCreate", async (message) => {
         }
         session.handleLoop(message, (arg || null) as LoopMode | null);
     }
+    if (lower === "!clear") session.handleClear(message);
+    if (lower === "!remove" || lower.startsWith("!remove ")) {
+        const arg = lower.slice(7).trim();
+        if (!/^\d+$/.test(arg)) {
+            console.log(`Ignoring !remove from ${message.author.tag}: expected a queue position, got "${arg}"`);
+            return;
+        }
+        session.handleRemove(message, Number(arg));
+    }
     if (lower === "!queue") session.logQueue(message, "!queue");
     if (lower === "!np") session.logNowPlaying(message, "!np");
 });
 
 session.client.on("ready", () => {
     console.log(`Logged in as ${session.client.user?.tag}`);
-    console.log("Commands: !play <URL> / !stop / !skip / !shuffle / !loop [off|one|all] / !queue / !np");
+    console.log("Commands: !play <URL> / !stop / !skip / !shuffle / !loop [off|one|all] / !remove <n> / !clear / !queue / !np");
 });
 
 session.start();

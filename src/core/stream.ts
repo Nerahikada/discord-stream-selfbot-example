@@ -184,6 +184,16 @@ export class StreamSession {
         this.guildFor(message)?.handleLoop(message, mode);
     }
 
+    /** Handles a `!clear` message by passing it to the stream in the guild it was sent from. */
+    handleClear(message: Message): void {
+        this.guildFor(message)?.handleClear(message);
+    }
+
+    /** Handles a `!remove` message by passing it to the stream in the guild it was sent from. */
+    handleRemove(message: Message, position: number): void {
+        this.guildFor(message)?.handleRemove(message, position);
+    }
+
     /** Logs what the guild a message was sent from is playing and what is queued behind it. */
     logQueue(message: Message, command: string): void {
         this.guildOf(message, command)?.logQueue(false);
@@ -342,6 +352,25 @@ class GuildSession {
         if (!this.fromListener(message, "!loop")) return;
         this.loop = mode ?? loopModes[(loopModes.indexOf(this.loop) + 1) % loopModes.length]!;
         this.log(`Received !loop from ${message.author.tag}, loop is now ${this.loop}`);
+    }
+
+    /** Handles a `!clear` message from a listener by emptying the queue, leaving what is playing alone. */
+    handleClear(message: Message): void {
+        if (!this.fromListener(message, "!clear")) return;
+        const count = this.queue.length;
+        this.queue.length = 0;
+        this.log(`Received !clear from ${message.author.tag}, removed ${count} queued`);
+    }
+
+    /** Handles a `!remove` message from a listener by dropping the source at 1-based `position` in the queue, as `!queue` numbers it. */
+    handleRemove(message: Message, position: number): void {
+        if (!this.fromListener(message, "!remove")) return;
+        if (!Number.isInteger(position) || position < 1 || position > this.queue.length) {
+            this.log(`Ignoring !remove from ${message.author.tag}: no position ${position} in a queue of ${this.queue.length}`);
+            return;
+        }
+        const [removed] = this.queue.splice(position - 1, 1);
+        this.log(`Received !remove from ${message.author.tag}, removed ${describe(removed!)} from position ${position}`);
     }
 
     /** Returns what is playing if the message author is listening in the channel being streamed to, logging why not otherwise. Says nothing when nothing is playing. */
