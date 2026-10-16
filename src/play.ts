@@ -1,8 +1,10 @@
 import { StreamSession, voiceChannelOf } from "./core/stream.ts";
 import type { LoopMode } from "./core/stream.ts";
-import { resolveMedia } from "./core/resolve.ts";
+import type { PlaybackSource } from "./core/stream.ts";
+import { resolveMedia, resolveTarget } from "./core/resolve.ts";
 import type { ResolvedMedia } from "./core/resolve.ts";
 import { remux } from "./core/remux.ts";
+import type { PrepareStreamOptions } from "@dank074/discord-video-stream";
 
 const maxHeight = 720;
 const maxFps = 30;
@@ -12,6 +14,36 @@ const bitrateVideoMax = 4000;
 const maxFreshLookups = 2;
 // Signed CDN URLs expire, so only a playback that starts this soon after its !play may reuse the lookup that validated it.
 const lookupReuseMs = 5 * 60_000;
+const maxPlaylistEntries = 100;
+
+/** A source for the page URL `target`. `lookup` is the resolve that validated it, if one was made; without it, the first playback resolves on its own. */
+function sourceFor(target: string, title: string | null, lookup: ResolvedMedia | null): PlaybackSource {
+    // Arbitrary sources never satisfy the no-B-frame / 1s-keyframe layout Discord needs, so unlike the file bot this one has to transcode.
+    const prepareOptions: Partial<PrepareStreamOptions> = { noTranscoding: false, videoCodec: "H264", bitrateVideo, bitrateVideoMax };
+
+    // A refused progressive URL stays refused for as long as it lives, so reopening it is pointless: the only way past is a fresh lookup, which mints new ones. This has to happen in here because `open` runs once per playback.
+    let reusable = lookup ? { media: lookup, at: Date.now() } : null;
+    const open = async (signal: AbortSignal) => {
+        let current = reusable && Date.now() - reusable.at < lookupReuseMs ? reusable.media : null;
+        reusable = null;
+        // Tied to the playback, so skipping through the queue does not leave a lookup running per skipped source.
+        current ??= await resolveMedia(target, maxHeight, signal);
+        signal.throwIfAborted();
+        for (let lookups = 0; ; lookups++) {
+            // Only ever cap, never pad: leaving height/frameRate unset keeps the source as-is, so an unknown or already-small source is not upscaled into wasted encoding.
+            prepareOptions.height = current.height && current.height > maxHeight ? maxHeight : undefined;
+            prepareOptions.frameRate = current.fps && current.fps > maxFps ? maxFps : undefined;
+            const { output, refused } = remux(current.video, current.audio, signal);
+            if (lookups >= maxFreshLookups || !(await refused)) return output;
+            console.log(`The CDN refused the URLs resolved for "${target}", resolving again (${lookups + 1}/${maxFreshLookups})`);
+            current = await resolveMedia(target, maxHeight, signal);
+            signal.throwIfAborted();
+        }
+    };
+
+    // The resolved CDN URLs are signed and change every lookup, so the page URL is what identifies this source.
+    return { label: target, title: title ?? undefined, open, prepareOptions };
+}
 
 const session = new StreamSession();
 
@@ -32,40 +64,31 @@ session.client.on("messageCreate", async (message) => {
         const voiceChannelId = voiceChannelOf(message, "!play");
         if (!voiceChannelId) return;
 
-        let media;
+        let resolved;
         try {
-            media = await resolveMedia(target, maxHeight);
+            resolved = await resolveTarget(target, maxHeight, maxPlaylistEntries);
         } catch (e) {
             console.log(`Ignoring !play from ${message.author.tag}: ${e instanceof Error ? e.message : e}`);
             return;
         }
-        console.log(`Resolved "${media.title}"${media.height ? ` (${media.height}p${media.fps ? Math.round(media.fps) : ""})` : ""}${media.isLive ? " [live]" : ""} for ${message.author.tag}`);
 
-        // Only ever cap, never pad: leaving height/frameRate unset keeps the source as-is, so an unknown or already-small source is not upscaled into wasted encoding.
-        const height = media.height && media.height > maxHeight ? maxHeight : undefined;
-        const frameRate = media.fps && media.fps > maxFps ? maxFps : undefined;
-
-        // Arbitrary sources never satisfy the no-B-frame / 1s-keyframe layout Discord needs, so unlike the file bot this one has to transcode.
-        const prepareOptions = { noTranscoding: false, height, frameRate, videoCodec: "H264" as const, bitrateVideo, bitrateVideoMax };
-
-        // A refused progressive URL stays refused for as long as it lives, so reopening it is pointless: the only way past is a fresh lookup, which mints new ones. This has to happen in here because `open` runs once per playback.
-        let lookup: { media: ResolvedMedia; at: number } | null = { media, at: Date.now() };
-        const open = async (signal: AbortSignal) => {
-            const reusable = lookup && Date.now() - lookup.at < lookupReuseMs ? lookup.media : null;
-            lookup = null;
-            let current = reusable ?? await resolveMedia(target, maxHeight);
-            signal.throwIfAborted();
-            for (let lookups = 0; ; lookups++) {
-                const { output, refused } = remux(current.video, current.audio, signal);
-                if (lookups >= maxFreshLookups || !(await refused)) return output;
-                console.log(`The CDN refused the URLs resolved for "${target}", resolving again (${lookups + 1}/${maxFreshLookups})`);
-                current = await resolveMedia(target, maxHeight);
-                signal.throwIfAborted();
+        let sources: PlaybackSource[];
+        if ("playlist" in resolved) {
+            const { playlist } = resolved;
+            if (playlist.entries.length === 0) {
+                console.log(`Ignoring !play from ${message.author.tag}: playlist "${playlist.title}" has no playable entries`);
+                return;
             }
-        };
+            // Entries are only looked up as they come up: a lookup takes seconds, and its signed URLs would expire long before the later entries play.
+            console.log(`Resolved playlist "${playlist.title}" with ${playlist.entries.length} entries${playlist.capped ? ` (capped at ${maxPlaylistEntries})` : ""} for ${message.author.tag}`);
+            sources = playlist.entries.map((entry) => sourceFor(entry.url, entry.title, null));
+        } else {
+            const { media } = resolved;
+            console.log(`Resolved "${media.title}"${media.height ? ` (${media.height}p${media.fps ? Math.round(media.fps) : ""})` : ""}${media.isLive ? " [live]" : ""} for ${message.author.tag}`);
+            sources = [sourceFor(target, media.title, media)];
+        }
 
-        // The resolved CDN URLs are signed and change every lookup, so the page URL is what identifies this request.
-        session.enqueue(message.guild.id, voiceChannelId, { label: target, title: media.title, open, prepareOptions }, { command: "!play", requester: message.author.tag });
+        session.enqueue(message.guild.id, voiceChannelId, sources, { command: "!play", requester: message.author.tag });
     }
 
     if (lower === "!stop") session.handleStop(message);

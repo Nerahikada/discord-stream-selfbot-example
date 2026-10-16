@@ -15,7 +15,7 @@ const videoCodecMap: Record<number, string | undefined> = { [AVCodecID.AV_CODEC_
 // A header follows within a second of data actually flowing, so this only has to be loose enough to cover a slow start.
 const headerTimeoutMs = 30_000;
 
-/** One thing to play: `label` identifies it for dedupe and logs, `title` is what the queue lists it as if known, `open` yields the ffmpeg input and may tie child processes to the playback's signal. `open` is awaited, so a source can take its time settling on an input that works. */
+/** One thing to play: `label` identifies it for dedupe and logs, `title` is what the queue lists it as if known, `open` yields the ffmpeg input and may tie child processes to the playback's signal. `open` is awaited, so a source can take its time settling on an input that works, and `prepareOptions` is only read once it settles, so `open` may fill them in from what it found. */
 export interface PlaybackSource { label: string; title?: string; open: (signal: AbortSignal) => string | Readable | Promise<string | Readable>; prepareOptions: Partial<PrepareStreamOptions> }
 
 export interface RequestContext { command: string; requester: string }
@@ -159,9 +159,9 @@ export class StreamSession {
         this.guildSession(guildId).request(channelId, source, ctx);
     }
 
-    /** Queues `source` behind whatever `guildId` is playing, or plays it at once if nothing is. */
-    enqueue(guildId: string, channelId: string, source: PlaybackSource, ctx: RequestContext): void {
-        this.guildSession(guildId).enqueue(channelId, source, ctx);
+    /** Queues `sources` behind whatever `guildId` is playing, or starts on the first of them if nothing is. */
+    enqueue(guildId: string, channelId: string, sources: PlaybackSource[], ctx: RequestContext): void {
+        this.guildSession(guildId).enqueue(channelId, sources, ctx);
     }
 
     /** Handles a `!stop` message by passing it to the stream in the guild it was sent from. */
@@ -293,16 +293,24 @@ class GuildSession {
         }
     }
 
-    /** Queues `source` behind whatever is playing, or plays it at once if nothing is. A request from outside the streamed channel is ignored, since nobody there would hear what it queues. */
-    enqueue(channelId: string, source: PlaybackSource, ctx: RequestContext): void {
+    /** Queues `sources` behind whatever is playing, or starts on the first of them if nothing is. A request from outside the streamed channel is ignored, since nobody there would hear what it queues. */
+    enqueue(channelId: string, sources: PlaybackSource[], ctx: RequestContext): void {
         const active = this.active;
-        if (!active) { this.request(channelId, source, ctx); return; }
-        if (channelId !== active.channelId) {
+        if (active && channelId !== active.channelId) {
             this.log(`Ignoring ${ctx.command} from ${ctx.requester}: not in the voice channel being streamed to`);
             return;
         }
-        this.queue.push(source);
-        this.log(`Queued "${source.label}" at position ${this.queue.length} at the request of ${ctx.requester}`);
+        let rest = sources;
+        if (!active) {
+            const [first, ...others] = sources;
+            if (!first) return;
+            this.request(channelId, first, ctx);
+            rest = others;
+        }
+        if (rest.length === 0) return;
+        const start = this.queue.length + 1;
+        this.queue.push(...rest);
+        this.log(rest.length === 1 ? `Queued "${rest[0]!.label}" at position ${start} at the request of ${ctx.requester}` : `Queued ${rest.length} at positions ${start}-${this.queue.length} at the request of ${ctx.requester}`);
     }
 
     /** Logs what is playing and, unless `currentOnly`, everything queued behind it. */
@@ -539,7 +547,8 @@ class GuildSession {
         // Both of these can throw, and they run before the teardown block below exists, so a failure here has to clean up on its own rather than becoming an unhandled rejection. A teardown that lands while `open` is still pending surfaces here too, as prepareStream refusing an aborted signal.
         let prepared: ReturnType<typeof prepareStream>;
         try {
-            prepared = prepareStream(await source.open(ac.signal), source.prepareOptions, ac.signal);
+            const input = await source.open(ac.signal);
+            prepared = prepareStream(input, source.prepareOptions, ac.signal);
         } catch (e) {
             if (!ac.signal.aborted) this.error("Failed to start playback:", e);
             ac.abort();
