@@ -169,6 +169,11 @@ export class StreamSession {
         this.guildFor(message)?.handleSkip(message);
     }
 
+    /** Handles a `!shuffle` message by passing it to the stream in the guild it was sent from. */
+    handleShuffle(message: Message): void {
+        this.guildFor(message)?.handleShuffle(message);
+    }
+
     /** Logs what the guild a message was sent from is playing and what is queued behind it. */
     logQueue(message: Message, command: string): void {
         this.guildOf(message, command)?.logQueue(false);
@@ -308,6 +313,17 @@ class GuildSession {
         this.log(`Received !skip from ${message.author.tag}, skipping ${describe(active.source)}`);
         this.playbackAbort?.abort();
         this.playNext();
+    }
+
+    /** Handles a `!shuffle` message from a listener by shuffling what is queued, leaving what is playing alone. */
+    handleShuffle(message: Message): void {
+        if (!this.fromListener(message, "!shuffle")) return;
+        const queue = this.queue;
+        for (let i = queue.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [queue[i], queue[j]] = [queue[j]!, queue[i]!];
+        }
+        this.log(`Received !shuffle from ${message.author.tag}, shuffled ${queue.length} queued`);
     }
 
     /** Returns what is playing if the message author is listening in the channel being streamed to, logging why not otherwise. Says nothing when nothing is playing. */
