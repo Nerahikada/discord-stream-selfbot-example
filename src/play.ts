@@ -64,15 +64,17 @@ session.client.on("messageCreate", async (message) => {
         };
 
         // The resolved CDN URLs are signed and change every lookup, so the page URL is what identifies this request.
-        session.enqueue(message.guild.id, voiceChannelId, { label: target, open, prepareOptions }, { command: "!play", requester: message.author.tag });
+        session.enqueue(message.guild.id, voiceChannelId, { label: target, title: media.title, open, prepareOptions }, { command: "!play", requester: message.author.tag });
     }
 
     if (lower === "!stop") session.handleStop(message);
+    if (lower === "!queue") session.logQueue(message, "!queue");
+    if (lower === "!np") session.logNowPlaying(message, "!np");
 });
 
 session.client.on("ready", () => {
     console.log(`Logged in as ${session.client.user?.tag}`);
-    console.log("Commands: !play <URL> / !stop");
+    console.log("Commands: !play <URL> / !stop / !queue / !np");
 });
 
 session.start();

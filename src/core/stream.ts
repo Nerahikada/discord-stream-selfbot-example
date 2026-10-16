@@ -15,8 +15,8 @@ const videoCodecMap: Record<number, string | undefined> = { [AVCodecID.AV_CODEC_
 // A header follows within a second of data actually flowing, so this only has to be loose enough to cover a slow start.
 const headerTimeoutMs = 30_000;
 
-/** One thing to play: `label` identifies it for dedupe and logs, `open` yields the ffmpeg input and may tie child processes to the playback's signal. `open` is awaited, so a source can take its time settling on an input that works. */
-export interface PlaybackSource { label: string; open: (signal: AbortSignal) => string | Readable | Promise<string | Readable>; prepareOptions: Partial<PrepareStreamOptions> }
+/** One thing to play: `label` identifies it for dedupe and logs, `title` is what the queue lists it as if known, `open` yields the ffmpeg input and may tie child processes to the playback's signal. `open` is awaited, so a source can take its time settling on an input that works. */
+export interface PlaybackSource { label: string; title?: string; open: (signal: AbortSignal) => string | Readable | Promise<string | Readable>; prepareOptions: Partial<PrepareStreamOptions> }
 
 export interface RequestContext { command: string; requester: string }
 
@@ -32,6 +32,10 @@ export function voiceChannelOf(message: Message, command: string): string | null
         return null;
     }
     return voiceChannelId;
+}
+
+function describe(source: PlaybackSource): string {
+    return source.title ? `"${source.title}" (${source.label})` : `"${source.label}"`;
 }
 
 /** Awaits the demuxer, giving up if ffmpeg settles, the playback is torn down, or no header arrives in time. A source that never produces a readable header leaves `demux` pending forever and destroying its input is the only thing that wakes it, so every way the wait can stall needs its own exit.
@@ -160,6 +164,16 @@ export class StreamSession {
         if (message.guild) this.guilds.get(message.guild.id)?.handleStop(message);
     }
 
+    /** Logs what the guild a message was sent from is playing and what is queued behind it. */
+    logQueue(message: Message, command: string): void {
+        this.guildOf(message, command)?.logQueue(false);
+    }
+
+    /** Logs what the guild a message was sent from is playing. */
+    logNowPlaying(message: Message, command: string): void {
+        this.guildOf(message, command)?.logQueue(true);
+    }
+
     /** Wires up the signal handlers, then logs the command client and the first spare streaming session in with `DISCORD_TOKEN`. */
     start(): void {
         const token = process.env.DISCORD_TOKEN;
@@ -171,6 +185,13 @@ export class StreamSession {
 
         this.client.login(token);
         this.pool.start(token);
+    }
+
+    /** Returns the stream of the guild a message was sent from, logging why not if it has none. */
+    private guildOf(message: Message, command: string): GuildSession | undefined {
+        const session = message.guild ? this.guilds.get(message.guild.id) : undefined;
+        if (!session) console.log(`Ignoring ${command} from ${message.author.tag}: nothing is playing`);
+        return session;
     }
 
     private guildSession(guildId: string): GuildSession {
@@ -247,6 +268,16 @@ class GuildSession {
         }
         this.queue.push(source);
         this.log(`Queued "${source.label}" at position ${this.queue.length} at the request of ${ctx.requester}`);
+    }
+
+    /** Logs what is playing and, unless `currentOnly`, everything queued behind it. */
+    logQueue(currentOnly: boolean): void {
+        const active = this.active;
+        if (!active) { this.log("Nothing is playing"); return; }
+        this.log(`Now playing: ${describe(active.source)}`);
+        if (currentOnly) return;
+        if (this.queue.length === 0) { this.log("The queue is empty"); return; }
+        this.log(`Queue (${this.queue.length}):\n${this.queue.map((source, i) => `  ${i + 1}. ${describe(source)}`).join("\n")}`);
     }
 
     /** Handles a `!stop` message, ignoring it unless the author is listening in the channel being streamed to. */
