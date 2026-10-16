@@ -68,13 +68,14 @@ session.client.on("messageCreate", async (message) => {
     }
 
     if (lower === "!stop") session.handleStop(message);
+    if (lower === "!skip") session.handleSkip(message);
     if (lower === "!queue") session.logQueue(message, "!queue");
     if (lower === "!np") session.logNowPlaying(message, "!np");
 });
 
 session.client.on("ready", () => {
     console.log(`Logged in as ${session.client.user?.tag}`);
-    console.log("Commands: !play <URL> / !stop / !queue / !np");
+    console.log("Commands: !play <URL> / !stop / !skip / !queue / !np");
 });
 
 session.start();

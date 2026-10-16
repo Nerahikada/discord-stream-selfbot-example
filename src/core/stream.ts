@@ -161,7 +161,12 @@ export class StreamSession {
 
     /** Handles a `!stop` message by passing it to the stream in the guild it was sent from. */
     handleStop(message: Message): void {
-        if (message.guild) this.guilds.get(message.guild.id)?.handleStop(message);
+        this.guildFor(message)?.handleStop(message);
+    }
+
+    /** Handles a `!skip` message by passing it to the stream in the guild it was sent from. */
+    handleSkip(message: Message): void {
+        this.guildFor(message)?.handleSkip(message);
     }
 
     /** Logs what the guild a message was sent from is playing and what is queued behind it. */
@@ -189,9 +194,13 @@ export class StreamSession {
 
     /** Returns the stream of the guild a message was sent from, logging why not if it has none. */
     private guildOf(message: Message, command: string): GuildSession | undefined {
-        const session = message.guild ? this.guilds.get(message.guild.id) : undefined;
+        const session = this.guildFor(message);
         if (!session) console.log(`Ignoring ${command} from ${message.author.tag}: nothing is playing`);
         return session;
+    }
+
+    private guildFor(message: Message): GuildSession | undefined {
+        return message.guild ? this.guilds.get(message.guild.id) : undefined;
     }
 
     private guildSession(guildId: string): GuildSession {
@@ -282,15 +291,35 @@ class GuildSession {
 
     /** Handles a `!stop` message, ignoring it unless the author is listening in the channel being streamed to. */
     handleStop(message: Message): void {
-        const active = this.active;
-        if (!active || !message.guild) return;
-        const member = message.guild.members.cache.get(message.author.id);
-        if (member?.voice.channelId !== active.channelId) {
-            this.log(`Ignoring !stop from ${message.author.tag}: not in the voice channel being streamed to`);
-            return;
-        }
+        if (!this.fromListener(message, "!stop")) return;
         this.log(`Received !stop from ${message.author.tag}`);
         this.stop();
+    }
+
+    /** Handles a `!skip` message from a listener by moving on to the next queued source, stopping if there is none. */
+    handleSkip(message: Message): void {
+        const active = this.fromListener(message, "!skip");
+        if (!active) return;
+        // Before the go-live exists there is no playback to cut short, and playNext would stop rather than wait for it.
+        if (!this.streamConn) {
+            this.log(`Ignoring !skip from ${message.author.tag}: the stream is still starting`);
+            return;
+        }
+        this.log(`Received !skip from ${message.author.tag}, skipping ${describe(active.source)}`);
+        this.playbackAbort?.abort();
+        this.playNext();
+    }
+
+    /** Returns what is playing if the message author is listening in the channel being streamed to, logging why not otherwise. Says nothing when nothing is playing. */
+    private fromListener(message: Message, command: string): ActiveRequest | null {
+        const active = this.active;
+        if (!active || !message.guild) return null;
+        const member = message.guild.members.cache.get(message.author.id);
+        if (member?.voice.channelId !== active.channelId) {
+            this.log(`Ignoring ${command} from ${message.author.tag}: not in the voice channel being streamed to`);
+            return null;
+        }
+        return active;
     }
 
     /** Tears everything down and hands the session back to the pool. */
