@@ -538,7 +538,8 @@ class GuildSession {
         if (this.active !== active || this.lease !== lease) return;
 
         // createStream resolves once Discord answers the SDP, before ICE/DTLS has connected, and the library silently drops every frame sent until then: playing straight away lost the first second of every stream. Polled because onStateChange holds a single callback, which the library already uses to reconnect.
-        const deadline = Date.now() + connectTimeoutMs;
+        const waitStart = Date.now();
+        const deadline = waitStart + connectTimeoutMs;
         while (!conn.ready) {
             if (Date.now() > deadline) {
                 this.error(`Go-live stream did not connect within ${connectTimeoutMs}ms`);
@@ -550,7 +551,7 @@ class GuildSession {
             if (this.active !== active || this.lease !== lease) return;
         }
         this.streamConn = conn;
-        this.log("Go-live stream created");
+        this.log(`Go-live stream created (transport connected ${Date.now() - waitStart}ms after createStream resolved)`);
 
         await this.startPlayback(source);
     }
