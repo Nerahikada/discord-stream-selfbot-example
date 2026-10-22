@@ -4,6 +4,7 @@ import { Streamer, prepareStream, demux } from "@dank074/discord-video-stream";
 import type { PrepareStreamOptions } from "@dank074/discord-video-stream";
 import { createRequire } from "node:module";
 import type { Readable } from "node:stream";
+import { setTimeout as sleep } from "node:timers/promises";
 
 const _require = createRequire(import.meta.url);
 const _libBase = _require.resolve("@dank074/discord-video-stream").replace(/dist\/index\.js$/, "");
@@ -14,6 +15,9 @@ const { AVCodecID } = await import(_libBase + "dist/media/LibavCodecId.js");
 const videoCodecMap: Record<number, string | undefined> = { [AVCodecID.AV_CODEC_ID_H264]: "H264", [AVCodecID.AV_CODEC_ID_H265]: "H265", [AVCodecID.AV_CODEC_ID_VP8]: "VP8", [AVCodecID.AV_CODEC_ID_VP9]: "VP9", [AVCodecID.AV_CODEC_ID_AV1]: "AV1" };
 // A header follows within a second of data actually flowing, so this only has to be loose enough to cover a slow start.
 const headerTimeoutMs = 30_000;
+// The transport measured about a second to connect after the go-live was created, so this only has to cover a slow ICE/DTLS handshake.
+const connectTimeoutMs = 15_000;
+const connectPollMs = 20;
 
 /** One thing to play: `label` identifies it for dedupe and logs, `title` is what the queue lists it as if known, `open` yields the ffmpeg input and may tie child processes to the playback's signal. `open` is awaited, so a source can take its time settling on an input that works, and `prepareOptions` is only read once it settles, so `open` may fill them in from what it found. */
 export interface PlaybackSource { label: string; title?: string; open: (signal: AbortSignal) => string | Readable | Promise<string | Readable>; prepareOptions: Partial<PrepareStreamOptions> }
@@ -532,6 +536,19 @@ class GuildSession {
             return;
         }
         if (this.active !== active || this.lease !== lease) return;
+
+        // createStream resolves once Discord answers the SDP, before ICE/DTLS has connected, and the library silently drops every frame sent until then: playing straight away lost the first second of every stream. Polled because onStateChange holds a single callback, which the library already uses to reconnect.
+        const deadline = Date.now() + connectTimeoutMs;
+        while (!conn.ready) {
+            if (Date.now() > deadline) {
+                this.error(`Go-live stream did not connect within ${connectTimeoutMs}ms`);
+                this.forget();
+                this.releaseLease();
+                return;
+            }
+            await sleep(connectPollMs);
+            if (this.active !== active || this.lease !== lease) return;
+        }
         this.streamConn = conn;
         this.log("Go-live stream created");
 
