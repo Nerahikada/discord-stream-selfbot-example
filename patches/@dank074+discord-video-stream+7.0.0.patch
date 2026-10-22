@@ -1,0 +1,14 @@
+diff --git a/node_modules/@dank074/discord-video-stream/dist/media/LibavDemuxer.js b/node_modules/@dank074/discord-video-stream/dist/media/LibavDemuxer.js
+index f56510c..3059053 100644
+--- a/node_modules/@dank074/discord-video-stream/dist/media/LibavDemuxer.js
++++ b/node_modules/@dank074/discord-video-stream/dist/media/LibavDemuxer.js
+@@ -59,9 +59,6 @@ export async function demux(input, { format }) {
+     const loggerFrameAudio = new Log("demux:frame:audio");
+     const filename = randomUUID();
+     const demuxer = await Demuxer.open(input, {
+-        options: {
+-            fflags: "nobuffer",
+-        },
+         format,
+         bufferSize: 8192,
+     });

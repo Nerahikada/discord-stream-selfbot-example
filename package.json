@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "postinstall": "patch-package",
     "setup:ffmpeg": "test -x bin/ffmpeg || (mkdir -p bin && curl -sL https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz | tar -xJ --strip-components=2 -C bin ffmpeg-master-latest-linux64-gpl/bin/ffmpeg && echo 'ffmpeg downloaded to bin/')",
     "setup:yt-dlp": "test -x bin/yt-dlp || (mkdir -p bin && curl -sL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux -o bin/yt-dlp && chmod +x bin/yt-dlp && echo 'yt-dlp downloaded to bin/')",
     "start": "npm run setup:ffmpeg && FFMPEG_PATH=$PWD/bin/ffmpeg node --env-file-if-exists=.env src/index.ts",
@@ -17,6 +18,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.0.0",
+    "patch-package": "^8.0.1",
     "typescript": "^7.0.0"
   }
 }
